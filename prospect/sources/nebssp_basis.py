@@ -19,7 +19,7 @@ __all__ = ["NebStepBasis"]
 cue_keys = [
     "ionspec_index1", "ionspec_index2", "ionspec_index3", "ionspec_index4",
     "ionspec_logLratio1", "ionspec_logLratio2", "ionspec_logLratio3",
-    "gas_logu", "gas_lognH", "gas_logz", "gas_logno", "gas_logco",
+    "gas_logu", "gas_logn", "gas_logz", "gas_logno", "gas_logco",
 ]
 
 def _predict_lines(theta, emul: Emulator):
