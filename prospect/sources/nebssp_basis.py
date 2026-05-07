@@ -9,7 +9,7 @@ from .fake_fsps import add_dust, add_igm
 try:
     from cue import Emulator
     from cue.utils import fit_4loglinear_ionparam        
-    from cue.utils import line_lam
+    from cue.utils import line_lam as _cue_line_lam
 except ImportError:
     raise ImportError("cue is required to use NebStepBasis. Install with `pip install astro-cue`.")
 
@@ -64,7 +64,17 @@ class NebStepBasis(FastStepBasis):
         _ = _predict_cont(_theta_default, self.ssp.wavelengths, self.emul)
 
         # Cue's emission line wav array
-        self.emline_wavelengths = np.asarray(line_lam)
+        self.emline_wavelengths = np.asarray(self.ssp.emline_wavelengths)
+        
+        cue_waves = np.asarray(_cue_line_lam)
+        self._cue_to_fsps_idx = np.array([
+            int(np.argmin(np.abs(self.emline_wavelengths - cw))) for cw in cue_waves
+        ])
+
+        # sanity check to ensure the Cue lines match within 1A
+        gaps = np.abs(self.emline_wavelengths[self._cue_to_fsps_idx] - cue_waves)
+        if np.any(gaps > 1):
+            raise ValueError("Cue emission lines do not match FSPS lines within 1A")
 
 
     def get_galaxy_spectrum(self, **params):
@@ -79,7 +89,7 @@ class NebStepBasis(FastStepBasis):
         self.ssp.set_tabular_sfh(time, sfr)
  
         wave, spec, lines = _get_spectrum(
-            self.ssp, self.params, self.emul, self.emline_wavelengths, tage=tmax)
+            self.ssp, self.params, self.emul, self.emline_wavelengths, self._cue_to_fsps_idx, tage=tmax)
         self._line_specific_luminosity = lines
         return wave, spec / mtot, self.ssp.stellar_mass / mtot
 
@@ -101,7 +111,7 @@ class NebStepBasis(FastStepBasis):
         return ewave, elum
 
 
-def _get_spectrum(ssp, params, emul, ewave, tage=0):
+def _get_spectrum(ssp, params, emul, ewave, cue_to_fsps_idx, tage=0):
     """Get FSPS spectrum, then add Cue lines and continuum. 
     And then add dust+IGM."""
 
@@ -117,8 +127,12 @@ def _get_spectrum(ssp, params, emul, ewave, tage=0):
         
         cue_params = {k: params[k] for k in cue_keys}
         theta = np.array(list(cue_params.values()))
-        line_pred = _predict_lines(theta, emul)
-        lines_list = [line_pred, np.zeros_like(ewave)]
+        line_pred_cue = _predict_lines(theta, emul)
+
+        # pad cue's lines to FSPS's full line array, then add to FSPS spec
+        line_pred_padded = np.zeros_like(ewave)
+        line_pred_padded[cue_to_fsps_idx] = line_pred_cue
+        lines_list = [line_pred_padded, np.zeros_like(ewave)]
  
         mask912 = wave >= 912
         csps[0][mask912] += _predict_cont(theta, wave[mask912], emul)
