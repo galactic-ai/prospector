@@ -123,7 +123,6 @@ def _get_spectrum(ssp, params, emul, ewave, tage=0):
         mask912 = wave >= 912
         csps[0][mask912] += _predict_cont(theta, wave[mask912], emul)
  
-    sspec, lines = add_dust(wave, csps, ewave, lines_list,
-                            dust1_index=ssp.params['dust1_index'], **params)
+    sspec, lines = add_dust(wave, csps, ewave, lines_list, **params)
     sspec = add_igm(wave, sspec, **params)
     return wave, sspec, lines
