@@ -8,7 +8,8 @@ from .fake_fsps import add_dust, add_igm
 
 try:
     from cue import Emulator
-    from cue.utils import fit_4loglinear_ionparam
+    from cue.utils import fit_4loglinear_ionparam        
+    from cue.utils import line_lam
 except ImportError:
     raise ImportError("cue is required to use NebStepBasis. Install with `pip install astro-cue`.")
 
@@ -63,11 +64,7 @@ class NebStepBasis(FastStepBasis):
         _ = _predict_cont(_theta_default, self.ssp.wavelengths, self.emul)
 
         # Cue's emission line wav array
-        self.emline_wavelengths = np.genfromtxt(
-            resource_filename("cue", "data/cue_emlines_info.dat"),
-            dtype=[("wave", "f8"), ("name", "<U20")],
-            delimiter=","
-        )['wave']
+        self.emline_wavelengths = np.asarray(line_lam)
 
 
     def get_galaxy_spectrum(self, **params):
@@ -110,36 +107,23 @@ def _get_spectrum(ssp, params, emul, ewave, tage=0):
 
     add_neb = params.get("add_neb_emission", False)
     use_stars = params.get("use_stellar_ionizing", False)
-    wave, _ = ssp.get_spectrum(tage=tage, peraa=True)
-    young, old = ssp.csp_young_old
-    csps = [young, old]
-    lines = []
+    wave, total_spec = ssp.get_spectrum(tage=tage, peraa=True)
+    csps = [total_spec, np.zeros_like(total_spec)]
+    lines_list = [np.zeros_like(ewave), np.zeros_like(ewave)]
 
-    if not add_neb:
-        lines = [np.zeros_like(ewave), np.zeros_like(ewave)]
-    else:
-        gas_logqion = params.get("gas_logqion", 49.1)
-
-        if not use_stars:
-            cue_params = {k: params[k] for k in cue_keys}
-            theta = np.array(list(cue_params.values()))
-            line_pred = _predict_lines(theta, emul)
-            lines = [line_pred, np.zeros_like(ewave)]
-            mask912 = wave >= 912
-            csps[0][mask912] += _predict_cont(theta, wave[mask912], emul)
+    if add_neb:
+        if use_stars:
+            params.update(**fit_4loglinear_ionparam(wave, total_spec))
         
-        else:
-            # derive ionization parameter from each CSP's stellar SED
-            for spec in csps:
-                params.update(**fit_4loglinear_ionparam(wave, spec))
-                cue_params = {k: params[k] for k in cue_keys}
-                theta = np.array(list(cue_params.values()))
-                line_pred = _predict_lines(theta, emul)
-                lines.append(line_pred)
-                mask912 = wave >= 912
-                spec[mask912] += _predict_cont(theta, wave[mask912], emul)
-
-    sspec, lines = add_dust(wave, csps, ewave, lines,
+        cue_params = {k: params[k] for k in cue_keys}
+        theta = np.array(list(cue_params.values()))
+        line_pred = _predict_lines(theta, emul)
+        lines_list = [line_pred, np.zeros_like(ewave)]
+ 
+        mask912 = wave >= 912
+        csps[0][mask912] += _predict_cont(theta, wave[mask912], emul)
+ 
+    sspec, lines = add_dust(wave, csps, ewave, lines_list,
                             dust1_index=ssp.params['dust1_index'], **params)
     sspec = add_igm(wave, sspec, **params)
     return wave, sspec, lines
