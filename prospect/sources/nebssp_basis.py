@@ -1,122 +1,145 @@
-"""
-NebSSPBasis — FastStepBasis subclass that uses cue.Emulator for nebular
-emission lines (Li+24) instead of FSPS+Cloudy defaults.
-
-Ported from bd-j/prospector@add_cue (commit 5f24db5) onto v2 main.
-
-v1→v2 changes:
-- import path: prospect.sources.ssp_basis → prospect.sources.galaxy_basis
-- _line_specific_luminosity attribute already hooked in v2's
-  galaxy_basis.SSPBasis.get_galaxy_elines (line ~144), so no override needed.
-
-Limitations:
-- use_stellar_ionizing=True path requires fit_log_linear_ionparam (undefined in
-  add_cue branch); raises NotImplementedError. Use False for first pass.
-"""
-
 import numpy as np
+from pkg_resources import resource_filename
 
+import fsps
 from .galaxy_basis import FastStepBasis
 from .fake_fsps import add_dust, add_igm
 
+
 try:
-    import cue
+    from cue import Emulator
+    from cue.utils import fit_4loglinear_ionparam
 except ImportError:
-    cue = None
+    raise ImportError("cue is required to use NebStepBasis. Install with `pip install astro-cue`.")
 
 
-__all__ = ["NebSSPBasis"]
+__all__ = ["NebStepBasis"]
 
+cue_keys = [
+    "ionspec_index1", "ionspec_index2", "ionspec_index3", "ionspec_index4",
+    "ionspec_logLratio1", "ionspec_logLratio2", "ionspec_logLratio3",
+    "gas_logu", "gas_lognH", "gas_logz", "gas_logno", "gas_logco",
+]
 
-class NebSSPBasis(FastStepBasis):
-    """FastStepBasis subclass with Cue (Li+24) nebular emission emulator.
+def _predict_lines(theta, emul: Emulator):
+    """1D line spec for one theta."""
+    out = emul.predict_lines(theta=np.atleast_2d(theta))
+    return np.squeeze(np.atleast_2d(out)[0])
 
-    Bypasses FSPS+Cloudy emission lines + nebular continuum + dust + IGM
-    in favor of: Cue lines/continuum, prospect-level dust+IGM (fake_fsps).
+def _predict_cont(theta, wave, emul: Emulator):
+    """1D continuum for one theta."""
+    out = emul.predict_cont(theta=np.atleast_2d(theta), wave=wave)
+    return np.squeeze(np.atleast_2d(out)[0])
 
-    :param cue_kwargs: dict
-        Forwarded to ``cue.Emulator(...)`` at construction.
-
-    :param reserved_params: list
-        Extends parent's reserved_params with ``dust1, dust2, dust3,
-        add_dust_emission, add_igm_absorption, igm_factor, add_neb_emission,
-        add_neb_continuum, nebemlineinspec, fagn, agn_tau``. These are
-        handled here, not by FSPS.
+class NebStepBasis(FastStepBasis):
+    """FastStepBasis with nebular emission lines and 
+    continuum from the Cue (Li+24) emulator.
+    
+    Replaces CLOUDY+FSPS nebular emission with the Cue emulator predictions.
+    Dust+IGM applied via `prospect.sources.fake_fsps`.
     """
 
     def __init__(self, cue_kwargs=None, **kwargs):
-        if cue is None:
-            raise ImportError("cue not installed; pip install astro-cue")
-        cue_kwargs = cue_kwargs or {}
-        self.emul = cue.Emulator(**cue_kwargs)
-
+        if Emulator is None:
+            raise ImportError("cue is required to use NebStepBasis. Install with `pip install astro-cue`.")
+        
         rp = ["dust1", "dust2", "dust3", "add_dust_emission",
-              "add_igm_absorption", "igm_factor",
-              "add_neb_emission", "add_neb_continuum", "nebemlineinspec",
-              "fagn", "agn_tau"]
+            "add_igm_absorption", "igm_factor",
+            "add_neb_emission", "add_neb_continuum", "nebemlineinspec",
+            "fagn", "agn_tau"]
         reserved_params = list(kwargs.pop("reserved_params", [])) + rp
         super().__init__(reserved_params=reserved_params, **kwargs)
-
         for k in ["add_igm_absorption", "add_dust_emission",
-                  "add_neb_emission", "nebemlineinspec"]:
+                "add_neb_emission", "nebemlineinspec"]:
             self.ssp.params[k] = False
 
+        cue_kwargs = cue_kwargs or {}
+        self.emul = Emulator(**cue_kwargs)
+
+        # warm up TF graph + load weights at __init__ to avoid first-call latency
+        _theta_default = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2,
+                        -2.5, 2.0, 0.0, 0.0, 0.0]
+        _ = _predict_lines(_theta_default, self.emul)
+        _ = _predict_cont(_theta_default, self.ssp.wavelengths, self.emul)
+
+        # Cue's emission line wav array
+        self.emline_wavelengths = np.genfromtxt(
+            resource_filename("cue", "data/cue_emlines_info.dat"),
+            dtype=[("wave", "f8"), ("name", "<U20")],
+            delimiter=","
+        )['wave']
+
+
     def get_galaxy_spectrum(self, **params):
-        """Build tabular SFH, get FSPS continuum (no neb/dust/igm), layer Cue."""
+        """Build Tabular SFH, get the FSPS spectrum, add Cue"""
         self.update(**params)
         if np.min(np.diff(10 ** self.params['agebins'])) < 1e6:
             raise ValueError("agebins spacing < 1 Myr would crash FSPS")
-
+ 
         mtot = self.params['mass'].sum()
         time, sfr, tmax = self.convert_sfh(self.params['agebins'], self.params['mass'])
         self.ssp.params["sfh"] = 3
         self.ssp.set_tabular_sfh(time, sfr)
-
-        wave, spec, lines = _get_spectrum(self.ssp, self.params, self.emul, tage=tmax)
+ 
+        wave, spec, lines = _get_spectrum(
+            self.ssp, self.params, self.emul, self.emline_wavelengths, tage=tmax)
         self._line_specific_luminosity = lines
         return wave, spec / mtot, self.ssp.stellar_mass / mtot
 
+    def get_galaxy_elines(self):
+        """Override to return Cue line luminosities instead of FSPS."""
+        ewave = self.emline_wavelengths
+        elum = getattr(self, "_line_specific_luminosity", None)
 
-def _get_spectrum(ssp, params, emul, tage=0):
-    """Returns (wave, sspec, lines) with Cue nebular replacing FSPS Cloudy.
+        if elum is None:
+            ewave = self.ssp.emline_wavelengths
+            elum = self.ssp.emline_luminosity.copy()
+        elum = np.asarray(elum)
 
-    sspec includes: stellar continuum (FSPS) + Cue nebular continuum + dust + IGM.
-    lines: emission line specific luminosity per young/old population.
-    """
-    add_neb = params.get("add_neb_emission", True)
+        if elum.ndim > 1:
+            elum = elum[0]
+        if self.ssp.params["sfh"] == 3:
+            mass = np.sum(self.params.get("mass", 1.0))
+            elum = elum / mass
+        return ewave, elum
+
+
+def _get_spectrum(ssp, params, emul, ewave, tage=0):
+    """Get FSPS spectrum, then add Cue lines and continuum. 
+    And then add dust+IGM."""
+
+    add_neb = params.get("add_neb_emission", False)
     use_stars = params.get("use_stellar_ionizing", False)
-    ewave = ssp.emline_wavelengths
-    wave, _ = ssp.get_spectrum(tage=tage, peraa=False)
-
-    # split stellar continuum into young + old populations
-    young, old = ssp._csp_young_old
+    wave, _ = ssp.get_spectrum(tage=tage, peraa=True)
+    young, old = ssp.csp_young_old
     csps = [young, old]
     lines = []
-    for spec in csps:
-        if add_neb:
-            if use_stars:
-                # extract Q_ion from young stellar SED to drive Cue
-                ion_params = _fit_log_linear_ionparam(wave, spec)
-                params.update(**ion_params)
-            line_prediction = emul.predict_lines(**params)
-            lines.append(line_prediction)
-            spec += emul.predict_cont(wave, **params)
-        else:
-            lines.append(np.zeros_like(ewave))
 
-    sspec, lines = add_dust(wave, csps, ewave, lines, **params)
+    if not add_neb:
+        lines = [np.zeros_like(ewave), np.zeros_like(ewave)]
+    else:
+        gas_logqion = params.get("gas_logqion", 49.1)
+
+        if not use_stars:
+            cue_params = {k: params[k] for k in cue_keys}
+            theta = np.array(list(cue_params.values()))
+            line_pred = _predict_lines(theta, emul)
+            lines = [line_pred, np.zeros_like(ewave)]
+            mask912 = wave >= 912
+            csps[0][mask912] += _predict_cont(theta, wave[mask912], emul)
+        
+        else:
+            # derive ionization parameter from each CSP's stellar SED
+            for spec in csps:
+                params.update(**fit_4loglinear_ionparam(wave, spec))
+                cue_params = {k: params[k] for k in cue_keys}
+                theta = np.array(list(cue_params.values()))
+                line_pred = _predict_lines(theta, emul)
+                lines.append(line_pred)
+                mask912 = wave >= 912
+                spec[mask912] += _predict_cont(theta, wave[mask912], emul)
+
+    sspec, lines = add_dust(wave, csps, ewave, lines,
+                            dust1_index=ssp.params['dust1_index'], **params)
     sspec = add_igm(wave, sspec, **params)
     return wave, sspec, lines
-
-
-def _fit_log_linear_ionparam(wave, spec):
-    """Derive Cue ionization params from stellar SED (Q_ion etc).
-
-    NOT implemented on add_cue branch (commit 5f24db5). Stub raises until
-    needed. For first-pass Cue integration use ``use_stellar_ionizing=False``
-    and pass log_qion / log_OH / gas_logu directly via model params.
-    """
-    raise NotImplementedError(
-        "fit_log_linear_ionparam not ported. Set use_stellar_ionizing=False "
-        "and provide Cue ionization params directly in model template."
-    )
