@@ -2,8 +2,7 @@
 import numpy as np
 from pkg_resources import resource_filename
 
-import os
-from scipy.interpolate import interp1d
+
 
 import fsps
 from .galaxy_basis import SSPBasis, FastStepBasis, CSPSpecBasis
