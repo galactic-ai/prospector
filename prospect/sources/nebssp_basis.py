@@ -1,7 +1,7 @@
 ### SSP for cuejax
 import numpy as np
 from pkg_resources import resource_filename
-
+import jax.numpy as jnp
 
 
 import fsps
@@ -95,7 +95,7 @@ class NebSSPBasis(SSPBasis):
         
         self.emul = Emulator(**cue_kwargs) # gas_logqion is fixed to 49.1
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _theta_warm = jnp.array([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0])
         _ = fast_line_prediction(_theta_warm, self.emul)
         _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
@@ -222,7 +222,7 @@ class NebStepBasis(FastStepBasis):
 
         self.emul = Emulator(**cue_kwargs) # gas_logqion is fixed to 49.1
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _theta_warm = jnp.array([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0])
         _ = fast_line_prediction(_theta_warm, self.emul)
         _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
@@ -323,7 +323,7 @@ class NebCSPBasis(CSPSpecBasis):
             
         self.emul = Emulator(**cue_kwargs)
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _theta_warm = jnp.array([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0])
         _ = fast_line_prediction(_theta_warm, self.emul)
         _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
