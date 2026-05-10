@@ -2,6 +2,9 @@
 import numpy as np
 from pkg_resources import resource_filename
 
+import os
+from scipy.interpolate import interp1d
+
 import fsps
 from .galaxy_basis import SSPBasis, FastStepBasis, CSPSpecBasis
 from .fake_fsps import add_dust, add_igm, idx
@@ -468,3 +471,45 @@ def get_spectrum(ssp, params, emul, ewave, tage=0):
     sspec, lines = add_dust(wave, csps, ewave, lines, dust1_index=ssp.params['dust1_index'], **params)
     sspec = add_igm(wave, sspec, **params)
     return wave, sspec, lines
+
+
+# ---------------- AGN torus emission ----------------
+
+SPS_HOME = os.getenv('SPS_HOME')
+Nenkova2008 = np.genfromtxt(
+    os.path.join(SPS_HOME, 'dust', 'Nenkova08_y010_torusg_n10_q2.0.dat'),
+    dtype=[('wave', 'f8'),
+           ('fnu_5', '<U20'), ('fnu_10', '<U20'), ('fnu_20', '<U20'),
+           ('fnu_30', '<U20'), ('fnu_40', '<U20'), ('fnu_60', '<U20'),
+           ('fnu_80', '<U20'), ('fnu_100', '<U20'), ('fnu_150', '<U20')],
+    delimiter='   ', skip_header=4)
+agndust_tau = np.array([5.0, 10.0, 20.0, 30.0, 40.0, 60.0, 80.0, 100.0, 150.0])
+agndust_lam = Nenkova2008['wave']
+nagndust = agndust_tau.shape[0]
+nagndust_spec = Nenkova2008['wave'].shape[0]
+
+agndust_specinit = [Nenkova2008['fnu_5'],  Nenkova2008['fnu_10'], Nenkova2008['fnu_20'],
+                    Nenkova2008['fnu_30'], Nenkova2008['fnu_40'], Nenkova2008['fnu_60'],
+                    Nenkova2008['fnu_80'], Nenkova2008['fnu_100'], Nenkova2008['fnu_150']]
+agndust_specinit = np.vstack(agndust_specinit).T
+agndust_specinit = np.array(agndust_specinit, dtype=np.float64)
+
+
+def agn_torus(wave, agn_tau):
+    """AGN torus emission based on Nenkova+2008.
+
+    wave: rest-frame wavelength in Angstrom
+    agn_tau: optical depth of the AGN dust torus, which affects the SED shape;
+             outside (5, 150) clamps to boundary.
+    """
+    agndust_spec = np.zeros((len(wave), nagndust), dtype=np.float64)
+    i1 = np.argmin(np.abs(wave - agndust_lam[0]))
+    i2 = np.argmin(np.abs(wave - agndust_lam[nagndust_spec - 1]))
+    for i in range(nagndust):
+        agndust_spec[i1:i2 + 1, i] = 10**np.interp(
+            np.log10(wave[i1:i2 + 1]),
+            np.log10(agndust_lam),
+            np.log10(agndust_specinit[:, i] + 1e-30)) - 1e-30
+    linfit = interp1d(agndust_tau, agndust_spec, axis=1,
+                      bounds_error=False, fill_value='extrapolate')
+    return linfit(agn_tau)
