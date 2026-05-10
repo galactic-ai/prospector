@@ -95,8 +95,9 @@ class NebSSPBasis(SSPBasis):
         
         self.emul = Emulator(**cue_kwargs) # gas_logqion is fixed to 49.1
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _ = fast_line_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0], self.emul)
-        _ = fast_cont_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0], 
+        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _ = fast_line_prediction(_theta_warm, self.emul)
+        _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
                                  self.emul, unit='Lsun/Hz')
         self.emline_wavelengths = np.genfromtxt(resource_filename("cuejax", "data/cue_emlines_info.dat"),
@@ -221,8 +222,9 @@ class NebStepBasis(FastStepBasis):
 
         self.emul = Emulator(**cue_kwargs) # gas_logqion is fixed to 49.1
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _ = fast_line_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0], self.emul)
-        _ = fast_cont_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0], 
+        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _ = fast_line_prediction(_theta_warm, self.emul)
+        _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
                                  self.emul, unit='Lsun/Hz')
         self.emline_wavelengths = np.genfromtxt(resource_filename("cuejax", "data/cue_emlines_info.dat"),
@@ -321,8 +323,9 @@ class NebCSPBasis(CSPSpecBasis):
             
         self.emul = Emulator(**cue_kwargs)
         # compile the functions first to speed up prediction, using an initial set of cue parameters in order
-        _ = fast_line_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 0.0, 0.0, 0.0, 49.1], self.emul)
-        _ = fast_cont_prediction([19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 0.0, 0.0, 0.0, 49.1], 
+        _theta_warm = [19.7, 5.3, 1.6, 0.6, 3.9, 0.01, 0.2, -2.5, 2.0, 0.0, 0.0, 0.0]
+        _ = fast_line_prediction(_theta_warm, self.emul)
+        _ = fast_cont_prediction(_theta_warm, 
                                  self.ssp.wavelengths,
                                  self.emul, unit='Lsun/Hz')
         self.emline_wavelengths = np.genfromtxt(resource_filename("cuejax", "data/cue_emlines_info.dat"),
