@@ -1,36 +1,67 @@
-import os
 import numpy as np
-from scipy.interpolate import interp1d
+import os
+import dill as pickle
+from pkg_resources import resource_filename
 
-__all__ = ["add_dust", "add_igm", "agn_torus"]
-
-
-def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=0.0,dust2=0.0,dust1_index=0.0,dust1=0.0,
-             frac_nodust=0,frac_obrun=0,
-             dust4_type=0,dust4_index=0.0,dust4=0.0,**kwargs):
-
-    d1_curve = attenuate(specs[0], wave, dust_type=dust_type, dust_index=dust_index, dust2=0, dust1_index=dust1_index, dust1=dust1, dust4=0.0)
-    cspi = specs[0]*d1_curve*(1-frac_obrun) + specs[0]*frac_obrun + specs[1]
-
-    diff_dust = attenuate(specs[1], wave, dust_type=dust_type, dust_index=dust_index, dust2=dust2, dust1=0.0,
-                          dust4_type=dust4_type, dust4_index=dust4_index, dust4=dust4)
-    specdust = (1-frac_nodust) * cspi*diff_dust + cspi*frac_nodust
+import jax.numpy as jnp
+import jax
+from pathlib import Path
 
 
-    # emission lines
-    d1_curve = attenuate(lines[0], line_waves, dust_type=dust_type, dust_index=dust_index, dust2=0, dust1_index=dust1_index, dust1=dust1, dust4=0.0)
-    ncspi = lines[0]*d1_curve*(1-frac_obrun) + lines[0]*frac_obrun + lines[1]
 
-    diff_dust = attenuate(lines[1], line_waves, dust_type=dust_type, dust_index=dust_index, dust2=dust2, dust1=0.0,
-                          dust4_type=dust4_type, dust4_index=dust4_index, dust4=dust4)
-    nebdust = ncspi*diff_dust*(1-frac_nodust) + ncspi*frac_nodust
+# index for the 128 emulated emission lines in fsps new line list
+idx = np.array([0,1,2,3,4,5,6,9,13,14,15,16,17,18,19,20,21,22,23,24,24,25,26,28,29,30,31,
+          32,34,35,37,38,39,40,41,43,44,45,46,47,48,49,50,51,52,53,54,57,59,61,62,
+          63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,84,85,86,87,88,89,
+          90,91,92,93,94,95,96,97,100,101,101,102,103,104,105,106,107,108,111,112,
+          114,116,118,119,122,123,125,127,129,130,134,137,139,140,143,145,146,148,
+          151,152,153,154,155,156,157,158,159,160,161,162,163,164,165])
 
-    return specdust, nebdust
+out = pickle.load(open(resource_filename("cuejax", "data/nn_stats_v0.pkl"), "rb"))
+frac_line_err = 1./out['SN_quantile'][1][np.argsort(out['wav'])] # 1 / upper 2 sigma quantike of SN of the cue test set
+
+__all__ = ["add_dust", "add_igm", "DustEmission"]
 
 
-def attenuate(spec,lam,dust_type=0,dust_index=0.0,dust2=0.0,dust1_index=0.0,dust1=0.0,
-              dust4_type=0,dust4_index=0.0,dust4=0.0):
-    """returns F(obs) / F(emitted) for a given attenuation curve + dust1 + dust2
+def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=-1.0,dust1=0.0,**kwargs):
+    """
+    wave: wavelength vector in Angstroms
+    specs: spectral flux density, in (young, old) pairs
+    line_waves: list of emission line wavelengths (Angstroms)
+    lines: emission line flux density, in (young, old) pairs
+    """
+
+    attenuated_specs = np.zeros_like(specs)
+    attenuated_lines = np.zeros_like(lines)
+
+    # Loop over the (young,old) pairs for both lines and continuum
+    for i, (spec, line) in enumerate(zip(specs,lines)):
+        if (i == 0):
+            d1 = dust1
+        else:
+            d1 = 0.0
+
+        attenuated_lines[i], diff_dust = attenuate(line,line_waves,dust_type=dust_type,dust_index=dust_index,dust2=dust2,dust1_index=dust1_index,dust1=d1)
+        attenuated_specs[i], diff_dust = attenuate(spec,wave,dust_type=dust_type,dust_index=dust_index,dust2=dust2,dust1_index=dust1_index,dust1=d1)
+        
+    attenuated_specs = attenuated_specs[0] + attenuated_specs[1]
+    attenuated_lines = attenuated_lines[0] + attenuated_lines[1] 
+    
+#     if kwargs.get("add_dust_emission", None):
+#         dust_specs = DustEmission(dust_file = os.getenv('SPS_HOME'),
+#                                   spec_lambda = wave, **kwargs).compute_dust_emission(
+#             attenuated_specs, specs[0]+specs[1], wave, 
+#             diff_dust, attenuated_lines, lines[0]+lines[1])[0]
+#         return dust_specs, attenuated_lines
+    
+#     else:
+#         return attenuated_specs, attenuated_lines
+    return attenuated_specs, attenuated_lines
+
+
+
+def attenuate(spec,lam,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=0.0,dust1=0.0):
+    """returns F(obs) for a given attenuation curve + dust1 + dust2
     """
 
     ### constants from FSPS
@@ -122,22 +153,15 @@ def attenuate(spec,lam,dust_type=0,dust_index=0.0,dust2=0.0,dust1_index=0.0,dust
 
         attn_curve = dust2*reddy
 
-    # -------------- AGN
-    ### power-law attenuation
-    attn_curve_4 = 0
-    if dust4_type != 0:
-        attn_curve_4 = (lam/lamv)**dust4_index * dust4
-
     dust1_ext = np.exp(-dust1*(lam/5500.)**dust1_index)
     dust2_ext = np.exp(-attn_curve)
-    dust4_ext = np.exp(-attn_curve_4)
 
-    ext_tot = dust2_ext*dust1_ext *dust4_ext
+    ext_tot = dust2_ext*dust1_ext
 
-    return ext_tot
+    return ext_tot*spec, dust2_ext
 
 
-def add_igm(wave, spec, zred=None, igm_factor=1.0, add_igm_absorption=None, **kwargs):
+def add_igm(wave, spec, zred=0., igm_factor=1.0, add_igm_absorption=None, **kwargs):
     """IGM absorption based on Madau+1995
     wave: rest-frame wavelength
     spec: spectral flux density
@@ -185,53 +209,267 @@ def add_igm(wave, spec, zred=None, igm_factor=1.0, add_igm_absorption=None, **kw
     return np.clip(res, a_min=tiny_number, a_max=None)
 
 
-#---------------- AGN torus emission ----------------
+class DustEmission:
 
-SPS_HOME = os.getenv('SPS_HOME')
-Nenkova2008 = np.genfromtxt(os.path.join(SPS_HOME, 'dust', 'Nenkova08_y010_torusg_n10_q2.0.dat'),
-                            dtype=[('wave', 'f8'),
-                                   ('fnu_5', '<U20'), ('fnu_10', '<U20'), ('fnu_20', '<U20'), 
-                                   ('fnu_30', '<U20'), ('fnu_40', '<U20'), ('fnu_60', '<U20'), 
-                                   ('fnu_80', '<U20'), ('fnu_100', '<U20'), ('fnu_150', '<U20')],
-                            delimiter='   ', skip_header=4)
-agndust_tau = np.array([5.0, 10.0, 20.0, 30.0, 40.0, 60.0, 80.0, 100.0, 150.0])
-agndust_lam = Nenkova2008['wave']
-nagndust = agndust_tau.shape[0] # =9, number of optical depths for AGN dust models
-nagndust_spec = Nenkova2008['wave'].shape[0] # =125, number of spectral points in the input library
+    def __init__(self, duste_model="DL07",
+                 dust_file=None, spec_lambda=None, **kwargs):
+        """
+        Initialize the DustEmission object with parameters for dust emission modeling.
 
-agndust_specinit = [Nenkova2008['fnu_5'],  Nenkova2008['fnu_10'], Nenkova2008['fnu_20'],
-                    Nenkova2008['fnu_30'], Nenkova2008['fnu_40'], Nenkova2008['fnu_60'],
-                    Nenkova2008['fnu_80'], Nenkova2008['fnu_100'], Nenkova2008['fnu_150']]
-agndust_specinit = np.vstack(agndust_specinit).T
-agndust_specinit = np.array(agndust_specinit, dtype=np.float64)
-# agndust_specinit[agndust_lam<3e4,:] = 0
+        Parameters
+        ----------
+        duste_model : str
+            Dust emission model to use: 'DL07' or 'THEMIS'.
+        dust_file : str
+            Path to the dust emission file (required).
+        spec_lambda : ndarray
+            Wavelength grid over which dust emission will be evaluated (required).
+        kwargs : dict
+            Optional keyword arguments to override default dust parameters.
+            Supported: duste_qpah, duste_umin, duste_gamma
+        """
 
-def agn_torus(wave, agn_tau):
-    """AGN torus emission based on Nenkova+2008
-    wave: rest-frame wavelength in Angstrom
-    agn_tau: optical depth of the AGN dust torus, which affects the shape of the AGN SED;
-             outside the range (5, 150) the AGN SED is those at 5 and 150.
+        # Store model choice (e.g., 'DL07' or 'THEMIS')
+        self.duste_model = duste_model
 
-    returns an AGN torus spectrum, interpolated on the input wavelength grid and agn_tau
-    """
-    agndust_spec = np.zeros((len(wave), nagndust), dtype=np.float64)
+        # Dust parameter values
+        self.duste_qpah = None
+        self.duste_umin = None
+        self.duste_gamma = None
 
-    # interpolate data onto wave
-    i1 = np.argmin(np.abs(wave - agndust_lam[0]))
-    i2 = np.argmin(np.abs(wave - agndust_lam[nagndust_spec - 1]))
-    for i in range(nagndust):
-        agndust_spec[i1:i2 + 1, i] = 10**np.interp(np.log10(wave[i1:i2 + 1]),
-                                                   np.log10(agndust_lam),
-                                                   np.log10(agndust_specinit[:, i] + 1e-30)) - 1e-30
+        # Model grid arrays for allowed values of qPAH and Umin
+        self.qpaharr = None
+        self.uminarr = None
 
-    # interpolate in tau_agn
-    # extrapolate if outside the bounds
-    ## no extrapolation -- if outside the bounds, use the NN
-    linfit = interp1d(agndust_tau, agndust_spec, axis=1, bounds_error=False, fill_value='extrapolate')
-        # fill_value=(agndust_spec[:,0], agndust_spec[:,-1]))
+        # Placeholder for loaded dust emission spectra
+        self.dustem2_dustem = None
 
-    agndust_speci = linfit(agn_tau)
+        # File path and wavelength grid
+        self.dust_file = None
+        self.spec_lambda = None
 
-    return agndust_speci
+        # Store any additional keyword arguments for later use
+        self.dwargs = kwargs
+
+        # Read in key dust parameters, allowing overrides via kwargs
+        self.duste_qpah = kwargs.pop("duste_qpah", 1.1)
+        self.duste_umin = kwargs.pop("duste_umin", 0.72)
+        self.duste_gamma = kwargs.pop("duste_gamma", 0.5)
+
+        # Set parameter grids based on selected dust model
+        if self.duste_model == "DL07":
+            self.qpaharr = jnp.array([0.47, 1.12, 1.77, 2.50, 3.19, 3.90, 4.58])
+            self.uminarr = jnp.array([
+                0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.7, 0.8, 1.0, 1.2, 1.5, 2.0,
+                2.5, 3.0, 4.0, 5.0, 7.0, 8.0, 12.0, 15.0, 20.0, 25.0
+            ])
+        elif self.duste_model == "THEMIS":
+            # THEMIS model uses smaller qPAH values rescaled to percent
+            self.qpaharr = jnp.array([0.02, 0.06, 0.10, 0.14, 0.17, 0.20, 0.24,
+                                      0.28, 0.32, 0.36, 0.40]) / 2.2 * 100
+            self.uminarr = jnp.array([
+                0.1, 0.12, 0.15, 0.17, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6,
+                0.7, 0.8, 1.0, 1.2, 1.5, 1.7, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0,
+                6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 17.0, 20.0, 25.0, 30.0,
+                35.0, 40.0, 50.0, 80.0
+            ])
+        else:
+            raise ValueError("Invalid duste_model. Choose 'DL07' or 'THEMIS'.")
+
+        # Ensure that necessary data is provided
+        if dust_file is None or spec_lambda is None:
+            raise ValueError("If `duste=True`, both `dust_file` and `spec_lambda` must be provided.")
+
+        self.dust_file = dust_file
+        self.spec_lambda = spec_lambda
+
+        # Load emission templates or model data from file
+        self.load_dust_emission(dust_file, spec_lambda)
+
+    def __repr__(self):
+        """
+        Custom string representation of the DustEmission object.
+        Provides a readable summary of model settings and parameters.
+        """
+
+        def format_array(arr):
+            """Helper to format short arrays inline; longer arrays multiline."""
+            if arr is None:
+                return "None"
+            if arr.ndim == 1 and len(arr) <= 5:
+                return f"[{', '.join(map(str, arr))}]"
+            return f"\n    " + "\n    ".join(map(str, arr))
+
+        attributes = {
+            "Duste model": self.duste_model,
+            "DUST qPAH": self.duste_qpah,
+            "DUST Umin": self.duste_umin,
+            "DUST Gamma": self.duste_gamma,
+            f"qpaharr ({self.duste_model})": format_array(self.qpaharr),
+            f"uminarr ({self.duste_model})": format_array(self.uminarr),
+            "dust_file": self.dust_file,
+            "spec_lambda": self.spec_lambda.shape if self.spec_lambda is not None else None,
+        }
+
+        if self.dwargs:
+            attributes["Extra parameters (dwargs)"] = self.dwargs
+
+        attr_str = "\n".join(f"  {k:<30}: {v}" for k, v in attributes.items() if v is not None)
+        return f"\nDustEmission Model:\n{'='*50}\n{attr_str}\n{'='*50}"
+
+    def load_dust_emission(self, dust_file=None, spec_lambda=None):
+        
+        # Use default paths if not provided
+        if dust_file is None:
+            dust_file = self.dust_file
+        if spec_lambda is None:
+            spec_lambda = self.spec_lambda
+
+        # Select dust model parameters
+        dust_model_params = {
+            "DL07": (7, 1001, 22),
+            "THEMIS": (11, 576, 37),
+        }
+        
+        if self.duste_model not in dust_model_params:
+            raise ValueError("Invalid duste_model. Choose 'DL07' or 'THEMIS'.")
+
+        nqpah_dustem, ndim_dustem, numin_dustem = dust_model_params[self.duste_model]
+
+        # Initialize storage for interpolated spectra (JAX-compatible)
+        dustem2_dustem = np.zeros((len(spec_lambda), nqpah_dustem, numin_dustem * 2))
+
+        # Read and interpolate dust emission spectra
+        for k in range(nqpah_dustem):
+            filename = Path(dust_file) / "dust" / "dustem" / f"{self.duste_model}_MW3.1_{'100' if k == 10 else f'{k}0'}.dat"
+
+            if not filename.exists():
+                raise FileNotFoundError(f"Error opening dust emission file: {filename}. File does not exist.")
+
+            with filename.open('r') as f:
+                next(f)  # Skip first header line
+                next(f)  # Skip second header line
+
+                lambda_dustem = np.zeros(ndim_dustem)
+                dustem_dustem = np.zeros((ndim_dustem, numin_dustem * 2))
+
+                for i in range(ndim_dustem):
+                    try:
+                        values = list(map(float, f.readline().strip().split()))
+                        lambda_dustem[i], dustem_dustem[i, :] = values[0], values[1:]
+                    except Exception:
+                        raise RuntimeError(f"Error reading dust emission file: {filename}")
+
+            # Convert wavelength from microns to Angstroms
+            lambda_dustem *= 1E4  
+
+            # Interpolate dust spectra onto the master wavelength array
+            jj = jnp.searchsorted(spec_lambda / 1E4, 1, side='left')
+            for j in range(numin_dustem * 2):
+                dustem2_dustem[jj:, k, j] = jnp.interp(spec_lambda[jj:], lambda_dustem, dustem_dustem[:, j])
+
+        self.dustem2_dustem = jnp.array(dustem2_dustem)
+
+    def compute_dust_emission(self, specdust, csp_spectra, spec_lambda, diff_dust, 
+                              linedust, line,
+                              duste_qpah=None, duste_umin=None, duste_gamma=None):
+        """
+        Compute dust emission using JAX-optimized vectorization for GPU acceleration.
+
+        Parameters:
+            specdust (jnp.ndarray): Attenuated spectrum after dust absorption.
+            csp_spectra (jnp.ndarray): Stellar spectrum before attenuation.
+            spec_lambda (jnp.ndarray): Wavelength array in Angstroms.
+            duste_qpah (float, optional): PAH fraction. Defaults to self.duste_qpah if None.
+            duste_umin (float, optional): Minimum U radiation field. Defaults to self.duste_umin if None.
+            duste_gamma (float, optional): Fraction of high U component. Defaults to self.duste_gamma if None.
+
+        Returns:
+            tuple: (Updated spectrum with dust emission added, Estimated dust mass)
+        """
+
+        # Use provided parameters if given, otherwise fallback to self attributes
+        duste_qpah = duste_qpah if duste_qpah is not None else self.duste_qpah
+        duste_umin = duste_umin if duste_umin is not None else self.duste_umin
+        duste_gamma = duste_gamma if duste_gamma is not None else self.duste_gamma
 
 
+        # Compute total luminosity before and after attenuation
+        nu = 2.9979E18 / spec_lambda  # Frequency in Hz (c / λ)
+        lbold = jax.scipy.integrate.trapezoid(nu * specdust, -nu) + jnp.sum(linedust)  # L_bol after attenuation
+        lboln = jax.scipy.integrate.trapezoid(nu * csp_spectra, -nu) + jnp.sum(line)  # L_bol before attenuation
+                
+        # Interpolation indices for PAH fraction and Umin
+        qlo = jnp.clip(jnp.searchsorted(self.qpaharr, duste_qpah) - 1, 0, len(self.qpaharr) - 2)
+        dq = jnp.clip((duste_qpah - self.qpaharr[qlo]) / (self.qpaharr[qlo + 1] - self.qpaharr[qlo]), 0.0, 1.0)
+        ulo = jnp.clip(jnp.searchsorted(self.uminarr, duste_umin) - 1, 0, len(self.uminarr) - 2)
+        du = jnp.clip((duste_umin - self.uminarr[ulo]) / (self.uminarr[ulo + 1] - self.uminarr[ulo]), 0.0, 1.0)
+    
+
+        # Ensure gamma fraction is within [0,1]
+        gamma = jnp.clip(duste_gamma, 0.0, 1.0)
+
+        # Perform bilinear interpolation over qpah and Umin using `vmap`
+        def interpolate_dustem(i):
+            return (
+                (1 - dq) * (1 - du) * self.dustem2_dustem[i, qlo, 2 * ulo - 1] +
+                dq * (1 - du) * self.dustem2_dustem[i, qlo + 1, 2 * ulo - 1] +
+                dq * du * self.dustem2_dustem[i, qlo + 1, 2 * (ulo + 1) - 1] +
+                (1 - dq) * du * self.dustem2_dustem[i, qlo, 2 * (ulo + 1) - 1]
+            ), (
+                (1 - dq) * (1 - du) * self.dustem2_dustem[i, qlo, 2 * ulo] +
+                dq * (1 - du) * self.dustem2_dustem[i, qlo + 1, 2 * ulo] +
+                dq * du * self.dustem2_dustem[i, qlo + 1, 2 * (ulo + 1)] +
+                (1 - dq) * du * self.dustem2_dustem[i, qlo, 2 * (ulo + 1)]
+            )
+
+        dumin, dumax = jax.vmap(interpolate_dustem)(jnp.arange(len(spec_lambda)))
+
+        # Compute dust emission spectrum
+        mduste = (1 - gamma) * dumin + gamma * dumax
+        mduste = jnp.maximum(mduste, 1e-70)
+        
+        # Normalize to absorbed luminosity
+        labs = lboln - lbold  # Energy absorbed by dust
+        norm = jax.scipy.integrate.trapezoid(nu * mduste, -nu)  # Normalization factor
+        duste = mduste / norm * labs  # Normalize dust emission
+        duste = jnp.maximum(duste, 1e-70)
+
+        # Iterative correction for dust self-absorption using `jax.lax.while_loop`
+        # sometimes this was stalled; use python while function instead
+#         def cond_fn(state):
+#             lbold, lboln, _ = state
+#             return jnp.abs(lboln - lbold) > 1e-2
+
+#         def body_fn(state):
+#             lbold, lboln, tduste = state
+#             oduste = duste
+#             duste_att = duste * diff_dust # Apply diffuse attenuation, duste *jnp.exp(-self.diffuse_tau)  
+#             tduste = tduste + duste_att
+
+#             lbold = jax.scipy.integrate.trapezoid(nu * duste_att, -nu)  # Update L_bol after self-absorption
+#             lboln = jax.scipy.integrate.trapezoid(nu * oduste, -nu)  # Before self-absorption
+
+#             duste = jnp.maximum(mduste / norm * (lboln - lbold), 1e-70)
+#             return lbold, lboln, tduste
+
+#         _, _, tduste = jax.lax.while_loop(cond_fn, body_fn, (lbold, lboln, jnp.zeros_like(duste)))
+
+        tduste = jnp.zeros_like(duste)
+        while jnp.abs(lboln - lbold) > 1e-2:
+            oduste = duste
+            duste_att = duste * diff_dust # Apply diffuse attenuation, duste *jnp.exp(-self.diffuse_tau)  
+            tduste = tduste + duste_att
+
+            lbold = jax.scipy.integrate.trapezoid(nu * duste_att, -nu)  # Update L_bol after self-absorption
+            lboln = jax.scipy.integrate.trapezoid(nu * oduste, -nu)  # Before self-absorption
+
+            duste = jnp.maximum(mduste / norm * (lboln - lbold), 1e-70)
+
+        # Compute estimated dust mass
+        mdust = 3.21E-3 / (4 * jnp.pi) * labs / norm
+  
+        # Add dust emission to the stellar spectrum
+        specdust = specdust + tduste
+
+        return specdust, mdust
