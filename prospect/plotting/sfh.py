@@ -11,6 +11,14 @@ from ..models.transforms import logsfr_ratios_to_masses
 from ..sources.constants import cosmo
 from .corner import quantile
 
+try:
+    # NumPy 2.0+
+    from numpy import trapezoid
+except ImportError:
+    # NumPy < 2.0
+    from numpy import trapz as trapezoid
+
+
 __all__ = ["params_to_sfh", "parametric_pset",
            "parametric_cmf", "parametric_mwa", "parametric_sfr",
            "compute_mass_formed",
@@ -20,17 +28,47 @@ __all__ = ["params_to_sfh", "parametric_pset",
 
 def params_to_sfh(params, time=None, agebins=None):
 
+    """Convert a set of SFH parameters into SFR(t) and CMF(t)
+
+    Parameters
+    ----------
+    params : dict-like
+        A dictionary of SFH parameters.  If it contains the keys
+        'tau', 'tage', and 'mass', then a parametric SFH is assumed.
+        Otherwise, it should contain the keys 'logmass' and
+        'logsfr_ratios', and a non-parametric SFH is assumed.
+    time : ndarray (optional)
+        If given, a set of times where you want to calculate the SFR and CMF, in
+        Gyr. These should be forward time, with the maximum value being the age
+        of the universe at the redshift of the object.
+    agebins : ndarray (optional)
+        If `time` is not given, the SFR and CMF will be computed at the edges
+        of the agebins.  This should be an array of shape (nbin, 2) giving the
+        log10 of the age bin edges in years.  If not given, a default set of
+        7 age bins will be used.
+    Returns
+    -------
+    lookback : ndarray
+        The lookback times (in Gyr) at which the SFR and CMF are computed.
+    sfhs : ndarray
+        The SFRs in Msun/yr.  Shape is (nsamples, ntime)
+    cmfs : ndarray
+        The cumulative mass formed, normalized to 1 at the oldest time.
+        Shape is (nsamples, ntime)
+    """
+    raise NotImplementedError("This function is deprecated.")
+
     parametric = (time is not None)
 
     if parametric:
         taus, tages, masses = params["tau"], params["tage"], params["mass"]
         sfhs = []
         cmfs = []
+        lookback = time.max() - time
         for tau, tage, mass in zip(taus, tages, masses):
             sfpar = dict(tau=tau, tage=tage, mass=mass, sfh=params["sfh"])
-            sfhs.append(parametric_sfr(times=time, tavg=0, **sfpar))
-            cmfs.append(parametric_cmf(times=time, **sfpar))
-        lookback = time.max() - time
+            sfhs.append(parametric_sfr(times=lookback, tavg=0, **sfpar))
+            cmfs.append(parametric_cmf(times=lookback, **sfpar))
         sfhs = np.array(sfhs)
         cmfs = np.array(cmfs)
 
@@ -79,16 +117,23 @@ def parametric_pset(logmass=None, **sfh):
 def sfh_quantiles(tvec, bins, sfrs, weights=None, q=[16, 50, 84]):
     """Compute quantiles of a binned SFH
 
-    :param tvec: shape (ntime,)
+    Parameters
+    ----------
+    tvec : shape (ntime,)
         Vector of lookback times onto which the SFH will be interpolated.
 
-    :param bins: shape (nsamples, nbin, 2)
+    bins : shape (nsamples, nbin, 2)
         The age bins, in linear untis, same units as tvec
 
-    :param sfrs: shape (nsamples, nbin)
+    sfrs : shape (nsamples, nbin)
         The SFR in each bin
 
-    :returns sfh_q: shape(ntime, nq)
+    q : list (optional, default: [16, 50, 84])
+        List of quantiles to compute, in percent (0-100)
+
+    Returns
+    -------
+    sfh_q : shape(ntime, nq)
         The quantiles of the SFHs at each lookback time in `tvec`
     """
     tt = bins.reshape(bins.shape[0], -1)
@@ -105,18 +150,22 @@ def parametric_sfr(times=None, tavg=1e-3, tage=1, **sfh):
     """Return the SFR (Msun/yr) for the given parameters of a parametric SFH,
     optionally averaging over some timescale.
 
-    :param times: (optional, ndarray)
+    Parameters
+    ----------
+    times : (optional, ndarray)
         If given, a set of *lookback* times where you want to calculate the sfr,
         same units as `tau` and `tage`
 
-    :param tavg: (optional, float, default: 1e-3)
+    tavg : (optional, float, default: 1e-3)
         If non-zero, average the SFR over the last `tavg` Gyr. This can help
         capture bursts.  If zero, the instantaneous SFR will be returned.
 
-    :param sfh: optional keywords
+    sfh : optional keywords
         FSPS parametric SFH parametrs, e.g. sfh, tage, tau, sf_trunc
 
-    :returns sfr:
+    Returns
+    -------
+    sfr : (ndarray, same shape as `times`)
         SFR in M_sun/year either for the lookback times given by `times` or at
         lookback time 0 if no times are given.  The SFR will either be
         instaneous or averaged over the last `tavg` Gyr.
@@ -164,7 +213,7 @@ def parametric_mwa_numerical(tau=4, tage=13.7, power=1, n=1000):
     """
     p = power + 1
     t = np.linspace(0, tage, n)
-    tavg = np.trapz((t**p)*np.exp(-t/tau), t) / np.trapz(t**(power) * np.exp(-t/tau), t)
+    tavg = trapezoid((t**p)*np.exp(-t/tau), t) / trapezoid(t**(power) * np.exp(-t/tau), t)
     return tage - tavg
 
 
@@ -393,7 +442,7 @@ def show_par_sfh(times, label="", axes=[], tavg=0.01, tol=1e-3, **params):
     if pset.sfh > 5:
         [ax.axvline(pset.sf_trunc, linestyle="--", label="tburst") for ax in axes]
 
-    mr = np.trapz(sfr, times) * 1e9 / mass.max()
+    mr = trapezoid(sfr, times) * 1e9 / mass.max()
     print("{}: {:0.6f}".format(label, mr))
     if (pset.sfh > 0) & (pset.fburst == 0):
         assert np.abs(mr - 1) < tol

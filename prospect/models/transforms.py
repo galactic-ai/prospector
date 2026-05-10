@@ -151,10 +151,22 @@ def zred_to_agebins(zred=0.0, agebins=[], **extras):
         The new SFH bin edges.
     """
     tuniv = cosmo.age(zred).value * 1e9
+    tuniv = np.atleast_1d(tuniv)[0]
     tbinmax = tuniv * 0.85
     ncomp = len(agebins)
     agelims = list(agebins[0]) + np.linspace(agebins[1][1], np.log10(tbinmax), ncomp-2).tolist() + [np.log10(tuniv)]
     return np.array([agelims[:-1], agelims[1:]]).T
+
+
+def zred_to_agebins_zmax(zred=None, nbins_sfh=5, zmax=20.0, **extras):
+    """Construct `nbins_sfh` bins in lookback time from 0 to age(zmax).  The
+    first bin goes from 0-10 Myr, the rest are evenly spaced in log time
+    """
+    tuniv = cosmo.age(zred).value*1e9
+    tbinmax = tuniv-cosmo.age(zmax).value*1e9
+    agelims = np.append(np.array([0.0, 7.0]), np.linspace(7.0, np.log10(tbinmax), int(nbins_sfh))[1:])
+    agebins = np.array([agelims[:-1], agelims[1:]])
+    return agebins.T
 
 
 def dustratio_to_dust1(dust2=0.0, dust_ratio=0.0, **extras):

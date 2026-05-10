@@ -53,7 +53,7 @@ environment, use the following procedure:
 Requirements
 ------------
 
-|Codename| works with ``python>=3.9``, and requires `numpy
+|Codename| works with ``python>=3.10``, and requires `numpy
 <http://www.numpy.org>`_ and `SciPy <http://www.scipy.org>`_
 
 You will also need:
@@ -61,7 +61,10 @@ You will also need:
 
 - `astropy <https://astropy.readthedocs.org/en/stable/>`_
 
--  `emcee <https://emcee.readthedocs.io/en/stable/>`_ and/or `dynesty <https://dynesty.readthedocs.io/en/latest/>`_
+-  `emcee <https://emcee.readthedocs.io/en/stable/>`_
+   and/or `dynesty <https://dynesty.readthedocs.io/en/latest/>`_
+   and/or `nautilus <https://nautilus-sampler.readthedocs.io/en/latest/index.html>`_
+   and/or `ultranest <https://johannesbuchner.github.io/UltraNest/index.html>`_
    for inference (Please cite these packages in any publications)
 
 -  `sedpy <https://github.com/bd-j/sedpy>`_ (for filter projections)
