@@ -24,7 +24,9 @@ frac_line_err = 1./out['SN_quantile'][1][np.argsort(out['wav'])] # 1 / upper 2 s
 __all__ = ["add_dust", "add_igm", "DustEmission"]
 
 
-def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=-1.0,dust1=0.0,**kwargs):
+def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=-1.0,dust1=0.0,
+             frac_obrun=0,frac_nodust=0,
+             dust4_type=0,dust4_index=0.0,dust4=0.0,**kwargs):
     """
     wave: wavelength vector in Angstroms
     specs: spectral flux density, in (young, old) pairs
@@ -32,21 +34,22 @@ def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=-0.7,dust2=0.0,d
     lines: emission line flux density, in (young, old) pairs
     """
 
-    attenuated_specs = np.zeros_like(specs)
-    attenuated_lines = np.zeros_like(lines)
+    #   dust1  birth-cloud screen on the young component (specs[0]/lines[0])
+    #   dust2  + dust4 (AGN power-law, Wang+24) diffuse screen on everything
+    #   frac_obrun   fraction of the young component that escapes dust1
+    #   frac_nodust  fraction of the combined light that escapes the diffuse screen
+    def _apply(w, s_young, s_old):
+        one = np.ones_like(w)
+        d1_ext,   _ = attenuate(one, w, dust_type=dust_type, dust_index=dust_index, dust2=0.0,
+                                dust1_index=dust1_index, dust1=dust1)
+        diff_ext, _ = attenuate(one, w, dust_type=dust_type, dust_index=dust_index, dust2=dust2,
+                                dust1_index=dust1_index, dust1=0.0,
+                                dust4_type=dust4_type, dust4_index=dust4_index, dust4=dust4)
+        cspi = s_young*d1_ext*(1-frac_obrun) + s_young*frac_obrun + s_old
+        return cspi*((1-frac_nodust)*diff_ext + frac_nodust)
 
-    # Loop over the (young,old) pairs for both lines and continuum
-    for i, (spec, line) in enumerate(zip(specs,lines)):
-        if (i == 0):
-            d1 = dust1
-        else:
-            d1 = 0.0
-
-        attenuated_lines[i], diff_dust = attenuate(line,line_waves,dust_type=dust_type,dust_index=dust_index,dust2=dust2,dust1_index=dust1_index,dust1=d1)
-        attenuated_specs[i], diff_dust = attenuate(spec,wave,dust_type=dust_type,dust_index=dust_index,dust2=dust2,dust1_index=dust1_index,dust1=d1)
-        
-    attenuated_specs = attenuated_specs[0] + attenuated_specs[1]
-    attenuated_lines = attenuated_lines[0] + attenuated_lines[1] 
+    attenuated_specs = _apply(wave,       specs[0], specs[1])
+    attenuated_lines = _apply(line_waves, lines[0], lines[1])
     
 #     if kwargs.get("add_dust_emission", None):
 #         dust_specs = DustEmission(dust_file = os.getenv('SPS_HOME'),
@@ -61,8 +64,9 @@ def add_dust(wave,specs,line_waves,lines,dust_type=0,dust_index=-0.7,dust2=0.0,d
 
 
 
-def attenuate(spec,lam,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=0.0,dust1=0.0):
-    """returns F(obs) for a given attenuation curve + dust1 + dust2
+def attenuate(spec,lam,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=0.0,dust1=0.0,
+              dust4_type=0,dust4_index=0.0,dust4=0.0):
+    """returns F(obs) for a given attenuation curve + dust1 + dust2 (+ dust4 AGN screen)
     """
 
     ### constants from FSPS
@@ -154,12 +158,18 @@ def attenuate(spec,lam,dust_type=0,dust_index=-0.7,dust2=0.0,dust1_index=0.0,dus
 
         attn_curve = dust2*reddy
 
+    # dust4: extra AGN power-law screen (Wang+24), part of the diffuse attenuation
+    attn_curve_4 = 0
+    if dust4_type != 0:
+        attn_curve_4 = (lam/lamv)**dust4_index * dust4
+
     dust1_ext = np.exp(-dust1*(lam/5500.)**dust1_index)
     dust2_ext = np.exp(-attn_curve)
+    dust4_ext = np.exp(-attn_curve_4)
 
-    ext_tot = dust2_ext*dust1_ext
+    ext_tot = dust2_ext*dust1_ext*dust4_ext
 
-    return ext_tot*spec, dust2_ext
+    return ext_tot*spec, dust2_ext*dust4_ext
 
 
 def add_igm(wave, spec, zred=0., igm_factor=1.0, add_igm_absorption=None, **kwargs):
