@@ -1,9 +1,56 @@
 import inspect
+from functools import partial
 import numpy as np
 import time
 import warnings
 
-__all__ = ["run_nested_sampler"]
+__all__ = ["run_nested_sampler", "unit_cube_identity", "lnlike_of_unit_cube"]
+
+
+def unit_cube_identity(unit_coords):
+    """Return the unit cube point unchanged.
+
+    This is the prior given to nautilus when ``nautilus_transform_in_likelihood``
+    is set, because the prior transform then runs inside the likelihood. It is
+    defined at module level so that it can be pickled.
+
+    Parameters
+    ----------
+    unit_coords : ndarray of shape ``(ndim,)``
+        Point in the unit cube.
+
+    Returns
+    -------
+    unit_coords : ndarray of shape ``(ndim,)``
+        The same point.
+    """
+    return unit_coords
+
+
+def lnlike_of_unit_cube(unit_coords, prior_transform=None, likelihood_function=None):
+    """Return the likelihood of a unit cube point.
+
+    The point is mapped to parameter space with ``prior_transform`` and the
+    result is passed to ``likelihood_function``. This gives the same value as
+    applying the two functions one after the other in separate processes. It is
+    defined at module level so that a ``functools.partial`` of it can be pickled
+    and sent to pool workers.
+
+    Parameters
+    ----------
+    unit_coords : ndarray of shape ``(ndim,)``
+        Point in the unit cube.
+    prior_transform : callable
+        Map from the unit cube to parameter space, usually ``model.prior_transform``.
+    likelihood_function : callable
+        Likelihood of a parameter vector.
+
+    Returns
+    -------
+    lnlike : float
+        The return value of ``likelihood_function(prior_transform(unit_coords))``.
+    """
+    return likelihood_function(prior_transform(unit_coords))
 
 
 def run_nested_sampler(model,
@@ -12,6 +59,7 @@ def run_nested_sampler(model,
                        nested_nlive=1000,
                        nested_neff=1000,
                        verbose=False,
+                       nautilus_transform_in_likelihood=False,
                        **kwargs):
     """We give a model -- parameter discription and prior transform -- and a
     likelihood function. We get back samples, weights, and likelihood values.
@@ -28,6 +76,15 @@ def run_nested_sampler(model,
         Minimum effective sample size.
     verbose : bool
         Whether to output sampler progress.
+    nautilus_transform_in_likelihood : bool (optional, default: False)
+        Only for nautilus. If ``True``, nautilus gets the identity as its prior
+        and a likelihood that applies ``model.prior_transform`` itself. The
+        transform then runs in the pool workers instead of serially in the main
+        process. The log likelihood of each unit cube point is unchanged, and so
+        is a nautilus checkpoint file, so a run can be resumed with either
+        setting. The returned ``points`` are in parameter space either way. The
+        returned sampler object has the identity as its prior, so its own
+        ``posterior()`` method gives unit cube points.
 
     Returns
     -------
@@ -40,13 +97,27 @@ def run_nested_sampler(model,
     if verbose:
         print(f"running {nested_sampler} for {nested_neff} effective samples")
 
+    if nautilus_transform_in_likelihood:
+        if nested_sampler != "nautilus":
+            raise ValueError("nautilus_transform_in_likelihood is only "
+                             f"available for nautilus, not '{nested_sampler}'.")
+        if kwargs.get("vectorized", False):
+            raise ValueError("nautilus_transform_in_likelihood does not "
+                             "support vectorized likelihoods.")
+
     go = time.time()
 
     # Initialize the sampler.
     if nested_sampler == 'nautilus':
         from nautilus import Sampler
         sampler_init = Sampler
-        init_args = (model.prior_transform, likelihood_function)
+        if nautilus_transform_in_likelihood:
+            unit_likelihood = partial(lnlike_of_unit_cube,
+                                      prior_transform=model.prior_transform,
+                                      likelihood_function=likelihood_function)
+            init_args = (unit_cube_identity, unit_likelihood)
+        else:
+            init_args = (model.prior_transform, likelihood_function)
         init_kwargs = dict(pass_dict=False, n_live=nested_nlive,
                            n_dim=model.ndim)
     elif nested_sampler == 'ultranest':
@@ -114,6 +185,10 @@ def run_nested_sampler(model,
     if nested_sampler == 'nautilus':
         obj = sampler
         points, log_w, log_like = sampler.posterior()
+        if nautilus_transform_in_likelihood:
+            # nautilus applied the identity, so map the unit cube points to
+            # parameter space here, one at a time as nautilus does it
+            points = np.array([model.prior_transform(u) for u in points])
         log_z = sampler.log_z
     elif nested_sampler == 'ultranest':
         obj = run_return

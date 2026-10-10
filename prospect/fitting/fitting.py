@@ -466,6 +466,14 @@ def run_nested(observations, model, sps,
         If ``True``, return the sampler result object as an entry in the
         output dictionary.
 
+    Extra Parameters
+    --------
+    nautilus_transform_in_likelihood : bool (optional, default: False)
+        Only for nautilus. If ``True``, the prior transform runs inside the
+        likelihood, so in the pool workers, instead of in the main process. The
+        returned ``points`` are in parameter space either way. See
+        :py:func:`prospect.fitting.nested.run_nested_sampler`.
+
     Returns
     --------
     result: Dictionary

@@ -147,6 +147,11 @@ def add_nested_args(parser):
                         help=("Number of bootstrap resamplings to use when estimating "
                               "ellipsoid expansion factor with dynesty."))
 
+    parser.add_argument("--nautilus_transform_in_likelihood", action="store_true",
+                        help=("If set, nautilus applies the prior transform inside the "
+                              "likelihood, so in the pool workers instead of in the main "
+                              "process. The returned samples are the same."))
+
     return parser
 
 
