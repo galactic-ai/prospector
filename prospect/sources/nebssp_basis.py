@@ -454,7 +454,8 @@ def get_spectrum(ssp, params, emul, ewave, tage=0):
         if not use_stars:
             cue_params = {k: params[k] for k in cue_keys}
             theta = np.array(list(cue_params.values()))
-            line_prediction = fast_line_prediction(theta, emul)[0].squeeze() * 10**(params["gas_logqion"] - 49.1)
+            # numpy, not JAX: see the comment in the use_stars branch below
+            line_prediction = np.asarray(fast_line_prediction(theta, emul)[0]).squeeze() * 10**(params["gas_logqion"] - 49.1)
             #if ssp.params["sfh"] == 3:
             #    line_prediction /= mass
             lines = [line_prediction, np.zeros_like(ewave)]
@@ -464,7 +465,11 @@ def get_spectrum(ssp, params, emul, ewave, tage=0):
                 params.update(**fit_4loglinear_ionparam(wave, spec))
                 cue_params = {k: params[k] for k in cue_keys}
                 theta = np.array(list(cue_params.values()))
-                line_prediction = fast_line_prediction(theta, emul)[0].squeeze() * 10**(params["gas_logqion"] - 49.1)
+                # Cue returns JAX arrays. Keep the lines in numpy, like the rest of prospect: the
+                # model's line spectrum works on line windows whose size changes with the line
+                # widths, and as JAX operations each new size compiles and caches a new
+                # executable, so memory grows with every call.
+                line_prediction = np.asarray(fast_line_prediction(theta, emul)[0]).squeeze() * 10**(params["gas_logqion"] - 49.1)
                 lines.append(line_prediction)
                 spec[wave>=912] += fast_cont_prediction(theta, wave[wave>=912], emul, unit='Lsun/Hz')[0].squeeze() * 10**(params["gas_logqion"] - 49.1)
         else:

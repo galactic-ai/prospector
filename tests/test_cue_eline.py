@@ -145,6 +145,21 @@ def test_filtersets(get_sps):
         # We always use filtersets now
 
 
+@pytest.mark.parametrize("basis, sfh", [(NebSSPBasis, "parametric_sfh"),
+                                        (NebStepBasis, "continuity_sfh")])
+def test_eline_lum_is_numpy(basis, sfh):
+    """Cue line luminosities reach the model as numpy arrays. As JAX arrays the line spectrum
+    compiles a new executable for each line window size, and memory grows with every call.
+    """
+    obslist = build_obs(observate.load_filters([f"sdss_{b}0" for b in "ugriz"]))
+    model_pars = TemplateLibrary[sfh]
+    model_pars.update(TemplateLibrary["cue_stellar_nebular"])
+    model_pars["nebemlineinspec"]["init"] = False
+    model = SpecModel(model_pars)
+    model.predict(model.theta, obslist, sps=basis(zcontinuous=1))
+    assert type(model._eline_lum) is np.ndarray
+
+
 def test_eline_implementation(get_sps, plot=False):
 
     test_eline_parsing()
