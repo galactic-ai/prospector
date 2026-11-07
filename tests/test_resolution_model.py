@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from scipy import integrate
 
 from prospect.models import priors
 from prospect.models.line_marginalisation import LineColumn
@@ -257,3 +258,20 @@ def test_column_needs_known_lines():
     """A column naming a line the model does not have raises."""
     with pytest.raises(ValueError, match="not in the line list"):
         with_columns([LineColumn("x", ("[S II] 6716",), ew_max=10.0)])
+
+
+def test_flat_prior_penalty_is_the_integral(observations):
+    """With flat priors the line penalty is ln of the integral of L over the amplitudes minus
+    ln L at the MLE, which is +1/2 ln|2 pi Sigma| (Johnson et al. 2021, App. E)."""
+    wave, _, gauss = observations
+    model = make_model(marginalize=True)
+    predict(model, gauss, FakeSPS())
+    emask = model._fit_eline_pixelmask
+    t = model.get_eline_gaussians(lineidx=model._elines_to_fit, wave=wave[emask])
+    ivar = gauss.uncertainty[emask] ** -2.0
+    s = 1 / np.sqrt(np.sum(ivar[:, None] * t**2, axis=0))
+    val, _ = integrate.dblquad(
+        lambda d2, d1: np.exp(-0.5 * np.sum(ivar * (t @ np.array([d1, d2])) ** 2)),
+        -12 * s[0], 12 * s[0], -12 * s[1], 12 * s[1], epsabs=0, epsrel=1e-10,
+    )
+    assert model._ln_eline_penalty == pytest.approx(np.log(val), abs=1e-6)

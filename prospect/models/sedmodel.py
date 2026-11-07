@@ -917,7 +917,7 @@ class SpecModel(ProspectorParams):
             # simply use the ML values and associated marginaliztion penalty
             alpha_bar = alpha_hat
             sigma_alpha_bar = sigma_alpha_hat
-            K = ln_mvn(alpha_hat, mean=alpha_hat, cov=sigma_alpha_hat)
+            K = -ln_mvn(alpha_hat, mean=alpha_hat, cov=sigma_alpha_hat)
 
         # Cache the ln-penalty, accumulating (in case there are multiple spectra)
         self._ln_eline_penalty += K
