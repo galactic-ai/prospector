@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from prospect.models import priors
+from prospect.models.line_marginalisation import LineColumn
 from prospect.models.sedmodel import SpecModel
 from prospect.observation import ResolutionMatrixSpectrum, Spectrum
 
@@ -143,3 +144,116 @@ def test_refuses_line_marginalisation(observations):
     _, rmat, _ = observations
     with pytest.raises(NotImplementedError, match="marginalization"):
         predict(make_model(marginalize=True), rmat, FakeSPS())
+
+
+# %% free line columns marginalised under a uniform EW prior
+
+OIII = LineColumn("[OIII]", ("[O III] 5007",), ew_max=1e4)
+
+
+def rmat_obs(wave, flux, mask=None):
+    """Return a rectified Gaussian-row ResolutionMatrixSpectrum holding ``flux``."""
+    d = np.arange(NDIAG) - NDIAG // 2
+    k = np.exp(-0.5 * (d / WIDTH) ** 2)
+    data = np.tile((k / k.sum())[::-1, None], (1, wave.size))
+    mask = np.ones(wave.size, dtype=bool) if mask is None else mask
+    obs = ResolutionMatrixSpectrum(wavelength=wave, resolution_matrix=data, flux=flux,
+                                   uncertainty=np.full(wave.size, 1e-10), mask=mask)
+    obs.rectify()
+    return obs
+
+
+def with_columns(columns, **kwargs):
+    """Return make_model() with free line columns."""
+    model = make_model(**kwargs)
+    model.parse_line_columns(columns)
+    return model
+
+
+def line_only(wave, sps):
+    """Return the noise-free prediction with the fixed lines and that of [OIII]5007 alone."""
+    full = predict(make_model(), rmat_obs(wave, np.ones(wave.size)), sps)
+    model = make_model()
+    model._use_eline = np.array([True, False])
+    model.parse_elines()
+    return full, full - predict(model, rmat_obs(wave, np.ones(wave.size)), sps)
+
+
+def test_column_recovers_sps_flux(observations):
+    """On noise-free data a wide box gives the SPS flux and App. E's term minus ln b."""
+    wave = observations[0]
+    sps = FakeSPS()
+    full, line = line_only(wave, sps)
+    model = with_columns([OIII])
+    out = predict(model, rmat_obs(wave, full), sps)
+    res = model._line_marginal
+    flux = LINES[1][1] * float(np.squeeze(model.flux_norm()))
+    # the fixture's continuum is ~1e9 times its line peak, so data - base loses ~1e-7 of the line
+    assert res.amplitude[0] == pytest.approx(flux, rel=1e-5)
+    assert np.allclose(out, full, rtol=0, atol=1e-6 * full.max())
+    precision = np.sum((line / flux) ** 2) / 1e-20
+    expect = 0.5 * np.log(2 * np.pi / precision) - np.log(model._line_column_upper[0])
+    assert model._ln_eline_penalty == pytest.approx(expect, abs=1e-6)
+
+
+def test_column_bound_is_ew_times_continuum(observations):
+    """With W at the line's own EW the MLE sits on the bound and ln P_B = ln 1/2."""
+    wave = observations[0]
+    sps = FakeSPS()
+    full, _ = line_only(wave, sps)
+    model = with_columns([OIII])
+    predict(model, rmat_obs(wave, full), sps)
+    mu = LINES[0][1]
+    cont = np.interp(mu, wave, model._resolved_continuum) * 2.998e18 / mu**2  # z = 0
+    # W from the fitted flux, since rounding moves it ~0.1 sigma from the SPS flux here
+    ew = model._line_marginal.amplitude[0] / cont
+    model = with_columns([OIII._replace(ew_max=ew)])
+    predict(model, rmat_obs(wave, full), sps)
+    s = np.sqrt(model._line_marginal.covariance[0, 0])
+    b = model._line_column_upper[0]
+    assert model._line_marginal.amplitude[0] == pytest.approx(b, rel=1e-6)
+    expect = 0.5 * np.log(2 * np.pi * s**2) - np.log(b) + np.log(0.5)
+    assert model._ln_eline_penalty == pytest.approx(expect, abs=1e-4)
+
+
+def test_column_without_pixels_drops_out(observations):
+    """A column whose line has no fitted pixels adds nothing to the penalty or the spectrum."""
+    wave = observations[0]
+    sps = FakeSPS()
+    full, line = line_only(wave, sps)
+    mask = np.abs(wave - LINES[0][1]) > 20.0
+    model = with_columns([OIII])
+    out = predict(model, rmat_obs(wave, full, mask=mask), sps)
+    assert model._ln_eline_penalty == 0.0
+    assert model._line_marginal.amplitude[0] == 0.0
+    assert np.allclose(out, full - line, rtol=0, atol=1e-6 * full.max())
+
+
+def test_added_column_keeps_sps_lines(observations):
+    """A non-replacing (broad) column adds to the SPS line, and fits zero on data without it."""
+    wave = observations[0]
+    sps = FakeSPS()
+    full, _ = line_only(wave, sps)
+    broad = LineColumn("[OIII] broad", ("[O III] 5007",), ew_max=1e3, sigma="eline_sigma_broad",
+                       velocity="eline_vbroad", replace=False)
+    model = with_columns([broad])
+    model.params["eline_sigma_broad"] = np.array([150.0])
+    model.params["eline_vbroad"] = np.array([-50.0])
+    out = predict(model, rmat_obs(wave, full), sps)
+    s = np.sqrt(model._line_marginal.covariance[0, 0])
+    assert abs(model._line_marginal.amplitude[0]) < 1e-6 * s
+    assert np.allclose(out, full, rtol=0, atol=1e-6 * full.max())
+
+
+def test_column_refuses_zero_continuum(observations):
+    """A bound W c <= 0 (no model continuum at the line) raises ValueError, so theta is rejected."""
+    wave = observations[0]
+    model = with_columns([OIII])
+    with pytest.raises(ValueError, match="positive"):
+        predict(model, rmat_obs(wave, np.full(wave.size, 1e-8)), FakeSPS(continuum=False))
+
+
+def test_column_needs_known_lines():
+    """A column naming a line the model does not have raises."""
+    with pytest.raises(ValueError, match="not in the line list"):
+        with_columns([LineColumn("x", ("[S II] 6716",), ew_max=10.0)])
