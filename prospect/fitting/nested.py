@@ -4,7 +4,8 @@ import numpy as np
 import time
 import warnings
 
-__all__ = ["run_nested_sampler", "unit_cube_identity", "lnlike_of_unit_cube"]
+__all__ = ["run_nested_sampler", "unit_cube_identity", "lnlike_of_unit_cube",
+           "unit_cube_likelihood"]
 
 
 def unit_cube_identity(unit_coords):
@@ -51,6 +52,33 @@ def lnlike_of_unit_cube(unit_coords, prior_transform=None, likelihood_function=N
         The return value of ``likelihood_function(prior_transform(unit_coords))``.
     """
     return likelihood_function(prior_transform(unit_coords))
+
+
+def unit_cube_likelihood(model, likelihood_function):
+    """Return the likelihood of unit cube points.
+
+    A likelihood with an ``of_unit_cube`` method, such as
+    :py:class:`prospect.fitting.fitting.ProcessLikelihood`, maps the points with
+    the model it builds in each process, so ``model`` is not pickled with it.
+    Otherwise the points are mapped with ``model.prior_transform``.
+
+    Parameters
+    ----------
+    model : instance of the :py:class:`prospect.models.SpecModel`
+        Gives the prior transform.
+    likelihood_function : callable
+        Likelihood of a parameter vector.
+
+    Returns
+    -------
+    unit_likelihood : callable
+        Likelihood of a unit cube point.
+    """
+    of_unit_cube = getattr(likelihood_function, "of_unit_cube", None)
+    if of_unit_cube is not None:
+        return of_unit_cube()
+    return partial(lnlike_of_unit_cube, prior_transform=model.prior_transform,
+                   likelihood_function=likelihood_function)
 
 
 def pocomc_sampler():
@@ -144,9 +172,7 @@ def run_nested_sampler(model,
         from nautilus import Sampler
         sampler_init = Sampler
         if nautilus_transform_in_likelihood:
-            unit_likelihood = partial(lnlike_of_unit_cube,
-                                      prior_transform=model.prior_transform,
-                                      likelihood_function=likelihood_function)
+            unit_likelihood = unit_cube_likelihood(model, likelihood_function)
             init_args = (unit_cube_identity, unit_likelihood)
         else:
             init_args = (model.prior_transform, likelihood_function)
@@ -170,9 +196,7 @@ def run_nested_sampler(model,
         from pocomc import Prior
         from scipy.stats import uniform
         sampler_init = pocomc_sampler()
-        unit_likelihood = partial(lnlike_of_unit_cube,
-                                  prior_transform=model.prior_transform,
-                                  likelihood_function=likelihood_function)
+        unit_likelihood = unit_cube_likelihood(model, likelihood_function)
         init_args = (Prior(model.ndim * [uniform(0.0, 1.0)]), unit_likelihood)
         init_kwargs = dict(n_dim=model.ndim)
     else:

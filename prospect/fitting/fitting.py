@@ -6,6 +6,7 @@ methods for prospector
 """
 
 
+import pickle
 import time
 from functools import partial as argfix
 
@@ -19,7 +20,7 @@ from .nested import run_nested_sampler
 from ..likelihood.likelihood import compute_chi, compute_lnlike
 
 
-__all__ = ["lnprobfn", "fit_model",
+__all__ = ["lnprobfn", "fit_model", "ProcessLikelihood",
            "run_minimize", "run_ensemble", "run_nested"
            ]
 
@@ -122,6 +123,78 @@ def wrap_lnp(lnpfn, observations, model, sps, **lnp_kwargs):
                   **lnp_kwargs)
 
 
+# The (observations, model, sps) of each likelihood builder, built in this process.
+_PROCESS_BUILDS = {}
+
+
+class ProcessLikelihood:
+    """A likelihood whose observations, model and SPS each process builds itself.
+
+    The builder is called once per process, on the first call, and its result
+    is kept for later calls. Pickling sends the builder, not what it built, so
+    a pool can run this likelihood when the SPS cannot be pickled.
+
+    Parameters
+    ----------
+    builder : callable
+        Takes no arguments and returns ``(observations, model, sps)``. It must
+        pickle by reference, for example a module level function or a
+        ``functools.partial`` of one. Each process keys its build by
+        ``pickle.dumps(builder)``.
+
+    lnprobfn : callable
+        Called as ``lnprobfn(theta, observations=..., model=..., sps=...,
+        **lnp_kwargs)``.
+
+    unit_cube : bool (optional, default: False)
+        If ``True``, calls take unit cube coordinates, which the built model's
+        ``prior_transform`` maps to parameters.
+
+    labels : list of str (optional)
+        Parameter labels the built model must have, usually those of the model
+        in the main process.
+    """
+
+    def __init__(self, builder, lnprobfn, unit_cube=False, labels=None,
+                 **lnp_kwargs):
+        self.builder = builder
+        self.lnprobfn = lnprobfn
+        self.unit_cube = unit_cube
+        self.labels = None if labels is None else list(labels)
+        self.lnp_kwargs = lnp_kwargs
+        self.key = pickle.dumps(builder)
+
+    def built(self):
+        """Return this process's (observations, model, sps), built on the first call.
+
+        Raises
+        ------
+        ValueError
+            If the built model's parameter labels differ from ``labels``.
+        """
+        if self.key not in _PROCESS_BUILDS:
+            observations, model, sps = self.builder()
+            got = list(model.theta_labels())
+            if self.labels is not None and got != self.labels:
+                raise ValueError(f"the built model has parameters {got}, "
+                                 f"not {self.labels}")
+            [obs.rectify() for obs in observations]
+            _PROCESS_BUILDS[self.key] = (observations, model, sps)
+        return _PROCESS_BUILDS[self.key]
+
+    def of_unit_cube(self):
+        """Return the same likelihood taking unit cube coordinates."""
+        return ProcessLikelihood(self.builder, self.lnprobfn, unit_cube=True,
+                                 labels=self.labels, **self.lnp_kwargs)
+
+    def __call__(self, x):
+        """Return ``lnprobfn`` at ``x``, a parameter vector or unit cube point."""
+        observations, model, sps = self.built()
+        theta = model.prior_transform(x) if self.unit_cube else x
+        return self.lnprobfn(theta, observations=observations, model=model,
+                             sps=sps, **self.lnp_kwargs)
+
+
 def fit_model(observations, model, sps, lnprobfn=lnprobfn,
               optimize=False, emcee=False, nested_sampler="",
               **kwargs):
@@ -175,6 +248,14 @@ def fit_model(observations, model, sps, lnprobfn=lnprobfn,
         parameters controlling dynesty can be passed via ``**kwargs``. See
         :py:func:`run_dynesty` for details.
 
+    likelihood_builder : callable (optional, default: None)
+        Only for the nested samplers. A function that takes no arguments and
+        returns ``(observations, model, sps)``. Each process then builds these
+        once and the likelihood sent to a pool holds only this function. See
+        :py:class:`ProcessLikelihood`. Use it when the SPS cannot be pickled.
+        ``observations`` and ``model`` given here must match what it builds;
+        ``sps`` may be ``None``.
+
     Returns
     -------
     output : dictionary
@@ -189,6 +270,10 @@ def fit_model(observations, model, sps, lnprobfn=lnprobfn,
         msg = ("Cannot run both emcee and nested fits "
                "in a single call to fit_model")
         raise(ValueError, msg)
+
+    if kwargs.get("likelihood_builder") is not None and (emcee or optimize):
+        raise ValueError("likelihood_builder is only used by the nested "
+                         "samplers, not by emcee or the optimization")
 
     if (not bool(emcee)) & (not bool(nested_sampler)) & (not optimize):
         msg = ("No sampling or optimization routine "
@@ -433,6 +518,7 @@ def run_nested(observations, model, sps,
                nested_target_n_effective=1000,
                verbose=False,
                return_sampler_result_object=False,
+               likelihood_builder=None,
                **kwargs):
     """Thin wrapper on :py:class:`prospect.fitting.nested.run_nested_sampler`
 
@@ -486,7 +572,11 @@ def run_nested(observations, model, sps,
         Duration of sampling in seconds of wall time.
     """
     # wrap the probability fiunction, making sure it's a likelihood
-    likelihood = wrap_lnp(lnprobfn, observations, model, sps, nested=True)
+    if likelihood_builder is None:
+        likelihood = wrap_lnp(lnprobfn, observations, model, sps, nested=True)
+    else:
+        likelihood = ProcessLikelihood(likelihood_builder, lnprobfn,
+                                       labels=model.theta_labels(), nested=True)
 
     output = run_nested_sampler(model,
                                 likelihood,
