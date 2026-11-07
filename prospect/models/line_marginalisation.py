@@ -24,8 +24,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.stats import qmc
 
-__all__ = ["LineColumn", "LineMarginal", "marginalise", "box_lnprob", "truncated_mean",
-           "connected_blocks"]
+__all__ = ["LineColumn", "LineMarginal", "mle_amplitudes", "marginalise", "box_lnprob",
+           "truncated_mean", "connected_blocks"]
 
 # Gauss-Legendre nodes for a block of 2; ln P converges slowest for positive correlation deep in
 # the tails, to 6e-5 at 20 sigma below zero.
@@ -58,6 +58,38 @@ blocks : column indices of each connected block, columns without data left out.
 """
 
 
+def mle_amplitudes(resid, ivar, templates):
+    """Return the MLE amplitudes, their covariance and ln det of their precision.
+
+    Johnson et al. (2021, appendix E): a_hat = (G^T C^-1 G)^-1 G^T C^-1 resid and
+    Sigma = (G^T C^-1 G)^-1, with C the data covariance.
+
+    Parameters
+    ----------
+    resid : ndarray of shape (n,)
+        Data minus the model without the amplitudes.
+    ivar : ndarray of shape (n,) or (n, n)
+        Inverse variance of each pixel (zero for pixels not fitted), or the inverse of the data
+        covariance matrix.
+    templates : ndarray of shape (n, k)
+        Spectrum of each amplitude at unit amplitude.
+
+    Returns
+    -------
+    amplitude : ndarray of shape (k,)
+    covariance : ndarray of shape (k, k)
+    ln_det_precision : float
+
+    Raises
+    ------
+    numpy.linalg.LinAlgError
+        If the precision G^T C^-1 G is not positive definite.
+    """
+    precision, rhs = _normal_equations(resid, ivar, templates)
+    cov, ln_det = _invert(precision)
+    return cov @ rhs, cov, ln_det
+
+
 def marginalise(resid, ivar, templates, upper):
     """Marginalise the amplitudes of ``templates`` under uniform priors on ``[0, upper]``.
 
@@ -65,8 +97,9 @@ def marginalise(resid, ivar, templates, upper):
     ----------
     resid : ndarray of shape (n,)
         Data minus the model without the marginalised lines.
-    ivar : ndarray of shape (n,)
-        Inverse variance of each pixel, zero for pixels not fitted.
+    ivar : ndarray of shape (n,) or (n, n)
+        Inverse variance of each pixel (zero for pixels not fitted), or the inverse of the data
+        covariance matrix.
     templates : ndarray of shape (n, k)
         Spectrum of each column at unit amplitude.
     upper : ndarray of shape (k,)
@@ -87,9 +120,7 @@ def marginalise(resid, ivar, templates, upper):
     if not np.all(upper > 0):
         raise ValueError("every amplitude bound must be positive")
     k = templates.shape[1]
-    weighted = templates * ivar[:, None]
-    precision = templates.T @ weighted
-    rhs = weighted.T @ resid
+    precision, rhs = _normal_equations(resid, ivar, templates)
     # a column without fitted pixels integrates to one over its prior and drops out
     fitted = np.flatnonzero(np.diag(precision) > 0)
     amplitude, covariance = np.zeros(k), np.zeros((k, k))
@@ -201,6 +232,13 @@ def truncated_mean(amplitude, covariance, upper, blocks):
                 f[m] += sign * np.exp(term)
         out[idx] = mu + cov @ f
     return out
+
+
+def _normal_equations(resid, ivar, templates):
+    """Return G^T C^-1 G and G^T C^-1 resid for a vector or matrix inverse covariance."""
+    ivar = np.asarray(ivar)
+    weighted = templates * ivar[:, None] if ivar.ndim == 1 else ivar @ templates
+    return templates.T @ weighted, weighted.T @ resid
 
 
 @lru_cache(maxsize=None)

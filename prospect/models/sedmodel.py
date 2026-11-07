@@ -22,7 +22,7 @@ from ..sources.constants import to_cgs_at_10pc as to_cgs
 from ..sources.constants import cosmo, lightspeed, ckms, jansky_cgs
 from ..observation.observation import ResolutionMatrixSpectrum
 from ..observation.resolution import line_profile
-from .line_marginalisation import marginalise
+from .line_marginalisation import marginalise, mle_amplitudes
 
 try:
     from ..sources.fake_fsps import frac_line_err # a very rough estimate of the emission line emulator error
@@ -886,12 +886,12 @@ class SpecModel(ProspectorParams):
         if sigma_spec.ndim == 2:
             sigma_inv = np.linalg.pinv(sigma_spec)
         else:
-            sigma_inv = np.diag(1. / sigma_spec)
+            sigma_inv = 1. / sigma_spec
 
-        # Calculate ML emission line amplitudes and covariance matrix
-        # FIXME: nebopt: do this with a solve
-        sigma_alpha_hat = np.linalg.pinv(np.dot(eline_gaussians.T, np.dot(sigma_inv, eline_gaussians)))
-        alpha_hat = np.dot(sigma_alpha_hat, np.dot(eline_gaussians.T, np.dot(sigma_inv, delta)))
+        # ML emission line amplitudes and covariance matrix (Johnson et al. 2021, App. E); a
+        # singular amplitude precision raises LinAlgError, a ValueError, so theta is rejected
+        alpha_hat, sigma_alpha_hat, ln_det_precision = mle_amplitudes(delta, sigma_inv,
+                                                                      eline_gaussians)
 
         # Generate likelihood penalty term (and MAP amplitudes)
 
@@ -917,7 +917,8 @@ class SpecModel(ProspectorParams):
             # simply use the ML values and associated marginaliztion penalty
             alpha_bar = alpha_hat
             sigma_alpha_bar = sigma_alpha_hat
-            K = -ln_mvn(alpha_hat, mean=alpha_hat, cov=sigma_alpha_hat)
+            # flat prior: + 1/2 ln|2 pi Sigma|
+            K = 0.5 * (len(alpha_hat) * np.log(2 * np.pi) - ln_det_precision)
 
         # Cache the ln-penalty, accumulating (in case there are multiple spectra)
         self._ln_eline_penalty += K

@@ -241,3 +241,53 @@ def test_truncated_mean_3d():
     ref, err = keep.mean(axis=0), keep.std(axis=0) / np.sqrt(len(keep))
     got = lm.truncated_mean(mean, cov, upper, [np.arange(3)])
     assert np.all(np.abs(got - ref) < 4 * err + 1e-3 * np.sqrt(np.diag(cov)))
+
+
+# %% shared MLE core, as used by SpecModel.fit_mle_elines
+
+
+def pinv_mle(resid, ivar, templates):
+    """Return a_hat, Sigma and ln det Sigma the way fit_mle_elines did before the shared core."""
+    sigma_inv = np.diag(ivar)
+    cov = np.linalg.pinv(templates.T @ sigma_inv @ templates)
+    return cov @ (templates.T @ sigma_inv @ resid), cov, np.linalg.slogdet(cov)[1]
+
+
+def test_mle_matches_pinv():
+    """For a well-conditioned precision the core equals the former pinv path to rounding."""
+    data, _ = toy([0.3, 4.0], seed=1)
+    a, cov, ln_det = lm.mle_amplitudes(data, IVAR, G)
+    a_p, cov_p, ln_det_cov_p = pinv_mle(data, IVAR, G)
+    assert np.allclose(a, a_p, rtol=1e-12)
+    assert np.allclose(cov, cov_p, rtol=1e-12)
+    assert -ln_det == pytest.approx(ln_det_cov_p, abs=1e-12)
+
+
+def test_mle_ill_conditioned_matches_pinv():
+    """At condition number ~1e9 (two lines 1e-4 widths apart) the core and the pinv path agree to
+    their rounding, about the condition number times machine precision."""
+    x = np.linspace(-5, 5, 200)
+    g = np.stack([np.exp(-0.5 * x**2), np.exp(-0.5 * (x - 1e-4) ** 2)], axis=1)
+    ivar = np.full(x.size, 1 / 0.09)
+    data = g @ [1.0, 2.0] + np.random.default_rng(1).normal(0, 0.3, x.size)
+    a, _, ln_det = lm.mle_amplitudes(data, ivar, g)
+    a_p, _, ln_det_cov_p = pinv_mle(data, ivar, g)
+    assert np.allclose(a, a_p, rtol=1e-6)
+    assert -ln_det == pytest.approx(ln_det_cov_p, abs=1e-6)
+
+
+def test_mle_matrix_noise_equals_vector():
+    """A diagonal inverse covariance matrix gives the same result as the inverse variance vector."""
+    data, _ = toy([0.3, 4.0], seed=1)
+    vec = lm.mle_amplitudes(data, IVAR, G)
+    mat = lm.mle_amplitudes(data, np.diag(IVAR), G)
+    for v, m in zip(vec, mat):
+        assert np.allclose(v, m, rtol=1e-12)
+
+
+def test_mle_singular_raises():
+    """Identical templates have a singular precision; the core raises instead of pinv's
+    meaningless value (its covariance has a negative determinant there)."""
+    data, _ = toy([0.3, 4.0], seed=1)
+    with pytest.raises(np.linalg.LinAlgError):
+        lm.mle_amplitudes(data, IVAR, np.stack([G[:, 0], G[:, 0]], axis=1))
