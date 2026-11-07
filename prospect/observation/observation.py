@@ -12,11 +12,12 @@ from sedpy.smoothing import smooth_fft
 from sedpy.observate import rebin
 
 from ..likelihood.noise_model import NoiseModel
+from .resolution import FINE_STEP, banded_offsets, banded_to_csr, fine_grid, resampled_matrix, uniform_step
 
 
 __all__ = ["Observation",
            "Spectrum", "Photometry", "Lines",
-           "UndersampledSpectrum", "IntrinsicSpectrum",
+           "UndersampledSpectrum", "IntrinsicSpectrum", "ResolutionMatrixSpectrum",
            "SplineOptCal", "PolyOptCal",
            "from_oldstyle", "from_serial", "obstypes"]
 
@@ -574,6 +575,83 @@ class IntrinsicSpectrum(Spectrum):
     """
 
     _kind = "intrinsic"
+
+
+class ResolutionMatrixSpectrum(Spectrum):
+    """
+    Spectrum whose line spread function is a banded resolution matrix R,
+    one row per pixel, applied through R' (see prospect.observation.resolution).
+    """
+    def __init__(self, wavelength=None, resolution_matrix=None, fine_step=FINE_STEP, **kwargs):
+        if "resolution" in kwargs:
+            raise ValueError("ResolutionMatrixSpectrum takes resolution_matrix, not resolution")
+        if wavelength is None or resolution_matrix is None:
+            raise ValueError("ResolutionMatrixSpectrum needs wavelength and resolution_matrix")
+        super(ResolutionMatrixSpectrum, self).__init__(wavelength=wavelength, resolution=None,
+                                                       **kwargs)
+
+        self._wavelength_step = uniform_step(self.wavelength)
+        data = np.asarray(resolution_matrix, dtype=np.float64)
+
+        if data.ndim != 2 or data.shape[1] != self.wavelength.size:
+            raise ValueError(f"resolution_matrix has shape {data.shape}, "
+                             f"expected (ndiag, {self.wavelength.size})")
+        
+        self.resolution_matrix_offsets = banded_offsets(data.shape[0])
+        self.resolution_matrix = data
+        self.fine_step = float(fine_step)
+        self._rprime = None
+
+    def __getstate__(self):
+        # R' is rebuilt on first use, so pickles sent to pool workers stay small
+        state = self.__dict__.copy()
+        state["_rprime"] = None
+        return state
+
+    def resampled(self):
+        """Return R', its fine model grid and the row sums of R, built on the first call."""
+        if self._rprime is None:
+            data = self.resolution_matrix
+            fine = fine_grid(self.wavelength, data.shape[0], step=self.fine_step)
+            rows = np.asarray(banded_to_csr(data).sum(axis=1)).ravel()
+            self._rprime = (resampled_matrix(self.wavelength, data, fine), fine, rows)
+        return self._rprime
+
+    def reach(self):
+        """Return the observed wavelength range whose model reaches the fitted pixels."""
+        fitted = self.wavelength[self.mask]
+        pad = (self.resolution_matrix.shape[0] // 2 + 1) * self._wavelength_step + self.fine_step
+        return float(fitted.min() - pad), float(fitted.max() + pad)
+
+    def check_rows(self, min_row_sum=0.5):
+        """Raise ValueError if a fitted pixel's row of R sums below ``min_row_sum``."""
+        rows = self.resampled()[2]
+        bad = self.mask & ~(rows >= min_row_sum)
+
+        if bad.any():
+            raise ValueError(f"{bad.sum()} fitted pixels have R row sums below {min_row_sum}, "
+                             f"first at {self.wavelength[bad][0]:.1f} A")
+
+    def instrumental_smoothing(self, model_wave_obsframe, model_flux, zred=0, libres=0):
+        """Apply R' to a model spectrum and return it on the observed pixels.
+
+        The library resolution must already be removed from the model (``libres`` zero),
+        since it cannot be removed from R.
+        """
+        if np.any(libres != 0):
+            raise ValueError("ResolutionMatrixSpectrum needs libres = 0; remove the library "
+                             "resolution from the model's LOSVD smoothing instead")
+        
+        rprime, fine, _ = self.resampled()
+
+        if np.array_equal(model_wave_obsframe, fine):
+            m = model_flux
+        else:
+            if model_wave_obsframe[0] > fine[0] or model_wave_obsframe[-1] < fine[-1]:
+                raise ValueError("the model wavelength grid does not cover the fine grid of R'")
+            m = np.interp(fine, model_wave_obsframe, model_flux)
+        
+        return rprime @ m
 
 
 class PolyOptCal:

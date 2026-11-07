@@ -19,6 +19,8 @@ from .parameters import ProspectorParams
 from .hyperparameters import ProspectorHyperParams
 from ..sources.constants import to_cgs_at_10pc as to_cgs
 from ..sources.constants import cosmo, lightspeed, ckms, jansky_cgs
+from ..observation.observation import ResolutionMatrixSpectrum
+from ..observation.resolution import line_profile
 
 try:
     from ..sources.fake_fsps import frac_line_err # a very rough estimate of the emission line emulator error
@@ -281,6 +283,9 @@ class SpecModel(ProspectorParams):
             including multiplication by the calibration vector. in units of
             maggies.
         """
+        if isinstance(obs, ResolutionMatrixSpectrum):
+            return self._predict_spec_rmatrix(obs)
+
         # redshift model wavelength
         obs_wave = self.observed_wave(self._wave, do_wavecal=False)
 
@@ -343,6 +348,79 @@ class SpecModel(ProspectorParams):
         self._sed = inst_spec / response
 
         return inst_spec
+
+    def _predict_spec_rmatrix(self, obs):
+        """Predict a ResolutionMatrixSpectrum observation.
+        This is a special case of predict_spec() that uses the resolution matrix
+        to smooth and rebin the model spectrum onto the observed wavelength grid.
+        Continuum is smoothed by the stellar LOSVD with the library resolution
+        removed, lines are built at their intrinsic widths, and R' applies
+        the instrument once to both.
+        """
+        self._outwave = obs.wavelength
+        rprime, fine, _ = obs.resampled()
+        obs.check_rows()
+
+        a = 1 + float(np.atleast_1d(self._zred)[0])
+        lo, hi = obs.reach()
+
+        # one library resolution is removed from the LOSVD, so it must be constant over
+        # the rest-frame range that reaches the fitted pixels
+        sel = (self._wave >= lo / a) & (self._wave <= hi / a)
+        lib = np.abs(np.broadcast_to(self._library_resolution, self._wave.shape))[sel]
+        if lib.max() - lib.min() > 0.5:
+            raise ValueError(f"library resolution varies from {lib.min():.1f} to "
+                             f"{lib.max():.1f} km/s over the fitted range")
+        lib = float(np.median(lib))
+        sigma = float(np.atleast_1d(self.params.get("sigma_smooth", 300.0))[0])
+        if sigma < lib:
+            raise ValueError(f"LOSVD {sigma:.1f} km/s is less than the library "
+                             f"resolution {lib:.1f} km/s")
+
+        # continuum on the fine grid: inside the reach, the LOSVD with the library resolution
+        # removed (sedpy inres); outside it, prospect's own _smooth_spec, which no pixel fits
+        inreach = (fine >= lo) & (fine <= hi)
+        cont = np.interp(fine, self._wave * a, self._smooth_spec)
+        rest = fine[inreach] / a
+        smooth = smoothspec(self._wave, self._norm_spec, sigma, outwave=rest,
+                            smoothtype="vel", fftsmooth=True, inres=lib)
+        cont[inreach] = self.add_damping_wing(rest, self.add_dla(rest, smooth))
+
+        # emission lines at intrinsic widths
+        lines = np.zeros(fine.size)
+        added = np.zeros(len(self._ewave_obs), dtype=bool)
+
+        if self._want_lines and self._need_lines:
+            if np.any(self._fit_eline & self._use_eline):
+                raise NotImplementedError("Line marginalization is not yet implemented "
+                                          "for ResolutionMatrixSpectrum")
+
+            width = float(np.atleast_1d(self.params.get("eline_sigma", sigma))[0])
+            elum = self._eline_lum * self.flux_norm() / a
+            for i in np.flatnonzero(self._fix_eline & self._use_eline):
+                sl, g = line_profile(fine, self._ewave_obs[i], width)
+                if g.size:
+                    lines[sl] += g * elum[i]
+                    added[i] = True
+
+        # R' application
+        self._resolved_continuum = rprime @ cont
+        self._resolved_lines = rprime @ lines
+        spec = self._resolved_continuum + self._resolved_lines
+
+        # line cache with intrinsic widths
+        self._valid_eline = added & self._use_eline
+        self._elines_to_fit = np.zeros_like(added)
+        self._fit_eline_pixelmask = np.zeros(spec.size, dtype=bool)
+        self._fix_eline_pixelmask = self._resolved_lines != 0
+
+        if self._want_lines and self._need_lines:
+            self._eline_sigma_kms = np.full(added.size, width)
+
+        response = obs.compute_response(spec=spec, extra_mask=True, **self.params)
+        self._speccal = response
+        self._sed = spec
+        return spec * response
 
 
     def predict_lines(self, obs, **extras):
