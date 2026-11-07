@@ -11,6 +11,7 @@ import os
 from numpy.polynomial.chebyshev import chebval, chebvander
 from scipy.interpolate import splrep, BSpline
 from scipy.signal import medfilt
+from scipy.sparse import csc_matrix
 
 from sedpy.observate import getSED
 from sedpy.smoothing import smoothspec
@@ -21,6 +22,7 @@ from ..sources.constants import to_cgs_at_10pc as to_cgs
 from ..sources.constants import cosmo, lightspeed, ckms, jansky_cgs
 from ..observation.observation import ResolutionMatrixSpectrum
 from ..observation.resolution import line_profile
+from .line_marginalisation import marginalise, mle_amplitudes
 
 try:
     from ..sources.fake_fsps import frac_line_err # a very rough estimate of the emission line emulator error
@@ -51,12 +53,13 @@ class SpecModel(ProspectorParams):
     and penalties for marginalization over emission line amplitudes.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, line_columns=None, **kwargs):
 
         super().__init__(*args, **kwargs)
 
         self.init_eline_info()
         self.parse_elines()
+        self.parse_line_columns(line_columns)
 
     def _available_parameters(self):
         new_pars = [("sigma_smooth", "LOSVD, in km/s, for the stars"),
@@ -386,9 +389,11 @@ class SpecModel(ProspectorParams):
                             smoothtype="vel", fftsmooth=True, inres=lib)
         cont[inreach] = self.add_damping_wing(rest, self.add_dla(rest, smooth))
 
-        # emission lines at intrinsic widths
+        # emission lines at intrinsic widths; lines in a replacing column are left out
         lines = np.zeros(fine.size)
         added = np.zeros(len(self._ewave_obs), dtype=bool)
+        columns = []
+        self._line_marginal = None
 
         if self._want_lines and self._need_lines:
             if np.any(self._fit_eline & self._use_eline):
@@ -397,11 +402,13 @@ class SpecModel(ProspectorParams):
 
             width = float(np.atleast_1d(self.params.get("eline_sigma", sigma))[0])
             elum = self._eline_lum * self.flux_norm() / a
-            for i in np.flatnonzero(self._fix_eline & self._use_eline):
+            fixed = self._fix_eline & self._use_eline & ~self._replaced_eline
+            for i in np.flatnonzero(fixed):
                 sl, g = line_profile(fine, self._ewave_obs[i], width)
                 if g.size:
                     lines[sl] += g * elum[i]
                     added[i] = True
+            columns = self._column_templates(fine, elum, sigma)
 
         # R' application
         self._resolved_continuum = rprime @ cont
@@ -418,9 +425,79 @@ class SpecModel(ProspectorParams):
             self._eline_sigma_kms = np.full(added.size, width)
 
         response = obs.compute_response(spec=spec, extra_mask=True, **self.params)
+        if columns:
+            spec = spec + self._marginalise_columns(obs, rprime, columns, spec, response)
+            self._resolved_lines = spec - self._resolved_continuum
+            self._fix_eline_pixelmask = self._resolved_lines != 0
         self._speccal = response
         self._sed = spec
         return spec * response
+
+    def _column_templates(self, fine, elum, sigma):
+        """Return the unit-flux template of each column on the fine grid, as sparse entries.
+
+        Lines in a column keep their SPS flux ratios. A column with no flux or no line on the fine
+        grid is left out. Each entry is (index, fine-grid rows, values, observed centre of its
+        strongest line); rows of overlapping lines repeat and are summed.
+        """
+        out = []
+        for j, (col, idx) in enumerate(zip(self.line_columns, self._column_lines)):
+            idx = idx[self._use_eline[idx]]
+            total = np.sum(elum[idx])
+            if idx.size == 0 or not total > 0:
+                continue
+            width = float(np.atleast_1d(self.params.get(col.sigma, sigma))[0])
+            shift = 1.0
+            if col.velocity is not None:
+                shift += float(np.atleast_1d(self.params[col.velocity])[0]) / ckms
+            rows, vals = [], []
+            for i in idx:
+                sl, g = line_profile(fine, self._ewave_obs[i] * shift, width)
+                rows.append(np.arange(sl.start, sl.start + g.size))
+                vals.append(g * elum[i] / total)
+            rows, vals = np.concatenate(rows), np.concatenate(vals)
+            if np.any(vals):
+                centre = self._ewave_obs[idx[np.argmax(elum[idx])]] * shift
+                out.append((j, rows, vals, centre))
+        return out
+
+    def _marginalise_columns(self, obs, rprime, columns, spec, response):
+        """Marginalise the free column amplitudes and return their line spectrum at the MLE.
+
+        Each amplitude is the column's line flux, with a uniform prior on its rest-frame
+        equivalent width from 0 to ``ew_max``. The continuum that turns the width into a flux is
+        the model continuum after R' at the strongest line of the column. The data are taken to
+        have known independent Gaussian noise. The marginal penalty is added to
+        ``_ln_eline_penalty`` and the result is cached as ``_line_marginal``.
+        """
+        noise = obs.noise
+        if noise is not None and (getattr(noise, "kernels", []) or getattr(noise, "f_outlier", 0)):
+            raise NotImplementedError("free line columns need independent Gaussian noise, "
+                                      "without noise kernels or outliers")
+        idx = np.array([c[0] for c in columns])
+        centre = np.array([c[3] for c in columns])
+        ew_max = np.array([self.line_columns[j].ew_max for j in idx], dtype=float)
+        a = 1 + float(np.atleast_1d(self._zred)[0])
+        # continuum per unit wavelength at the line, times (1 + z), turns rest EW into line flux
+        cont = np.interp(centre, obs.wavelength, self._resolved_continuum)
+        upper = ew_max * a * cont * lightspeed / centre**2
+
+        # R' on the sparse templates touches only the fine-grid points near each line
+        rows = np.concatenate([c[1] for c in columns])
+        cols = np.repeat(np.arange(len(columns)), [c[1].size for c in columns])
+        fine_templates = csc_matrix((np.concatenate([c[2] for c in columns]), (rows, cols)),
+                                    shape=(rprime.shape[1], len(columns)))
+        templates = (rprime @ fine_templates).toarray()
+        ivar = np.zeros(spec.size)
+        ivar[obs.mask] = obs.uncertainty[obs.mask] ** -2.0
+        resid = np.where(obs.mask, obs.flux - spec * response, 0.0)
+        result = marginalise(resid, ivar, templates * response[:, None], upper)
+
+        self._ln_eline_penalty += result.ln_penalty
+        self._line_marginal = result
+        self._line_column_index = idx
+        self._line_column_upper = upper
+        return templates @ result.amplitude
 
 
     def predict_lines(self, obs, **extras):
@@ -726,6 +803,31 @@ class SpecModel(ProspectorParams):
             self._use_eline = ~np.isin(self.emline_info["name"],
                                        self.params["elines_to_ignore"])
 
+    def parse_line_columns(self, line_columns=None):
+        """Cache the line indices of each free line column.
+
+        Parameters
+        ----------
+        line_columns : list of LineColumn, optional
+            Free amplitudes marginalised under a uniform prior on the equivalent width. Only
+            supported for ResolutionMatrixSpectrum observations.
+        """
+        self.line_columns = list(line_columns or [])
+        self._column_lines = []
+        self._replaced_eline = False
+        if not self.line_columns:
+            return
+        names = np.char.strip(np.asarray(self.emline_info["name"]).astype(str))
+        self._replaced_eline = np.zeros(len(names), dtype=bool)
+        for col in self.line_columns:
+            idx = np.flatnonzero(np.isin(names, col.lines))
+            missing = sorted(set(col.lines) - set(names[idx]))
+            if missing:
+                raise ValueError(f"lines {missing} of column {col.name} are not in the line list")
+            self._column_lines.append(idx)
+            if col.replace:
+                self._replaced_eline[idx] = True
+
     def fit_mle_elines(self, obs, calibrated_spec, sigma_spec=None):
         """Compute the maximum likelihood and, optionally, MAP emission line
         amplitudes for lines that fall within the observed spectral range. Also
@@ -784,12 +886,12 @@ class SpecModel(ProspectorParams):
         if sigma_spec.ndim == 2:
             sigma_inv = np.linalg.pinv(sigma_spec)
         else:
-            sigma_inv = np.diag(1. / sigma_spec)
+            sigma_inv = 1. / sigma_spec
 
-        # Calculate ML emission line amplitudes and covariance matrix
-        # FIXME: nebopt: do this with a solve
-        sigma_alpha_hat = np.linalg.pinv(np.dot(eline_gaussians.T, np.dot(sigma_inv, eline_gaussians)))
-        alpha_hat = np.dot(sigma_alpha_hat, np.dot(eline_gaussians.T, np.dot(sigma_inv, delta)))
+        # ML emission line amplitudes and covariance matrix (Johnson et al. 2021, App. E); a
+        # singular amplitude precision raises LinAlgError, a ValueError, so theta is rejected
+        alpha_hat, sigma_alpha_hat, ln_det_precision = mle_amplitudes(delta, sigma_inv,
+                                                                      eline_gaussians)
 
         # Generate likelihood penalty term (and MAP amplitudes)
 
@@ -815,7 +917,8 @@ class SpecModel(ProspectorParams):
             # simply use the ML values and associated marginaliztion penalty
             alpha_bar = alpha_hat
             sigma_alpha_bar = sigma_alpha_hat
-            K = ln_mvn(alpha_hat, mean=alpha_hat, cov=sigma_alpha_hat)
+            # flat prior: + 1/2 ln|2 pi Sigma|
+            K = 0.5 * (len(alpha_hat) * np.log(2 * np.pi) - ln_det_precision)
 
         # Cache the ln-penalty, accumulating (in case there are multiple spectra)
         self._ln_eline_penalty += K
