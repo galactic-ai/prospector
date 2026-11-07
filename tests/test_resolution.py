@@ -276,3 +276,40 @@ def test_spectrum_refuses_bad_inputs():
         obs.instrumental_smoothing(mw, np.ones_like(mw), libres=np.full_like(mw, 10.0))
     with pytest.raises(ValueError, match="cover"):
         obs.instrumental_smoothing(mw[600:], np.ones(mw.size - 600))  # starts at 5010 A
+
+
+def raw_profile(w, mu, sigma):
+    """Return SpecModel's unnormalised Gaussian line profile per Hz at ``w``."""
+    dv = rm.CKMS * (w / mu - 1)
+    g = np.exp(-0.5 * (dv / sigma) ** 2) / (sigma * np.sqrt(2 * np.pi))
+    return g * rm.CKMS * w**2 / (rm.LIGHTSPEED * mu)
+
+
+@pytest.mark.parametrize("sigma", [10.0, 45.0, 800.0])
+def test_line_profile_has_unit_flux_in_frequency(sigma):
+    """The profile sums to one over frequency, is centred on mu, and has width mu sigma / c."""
+    fine = np.arange(4000.0, 7000.0, rm.FINE_STEP)
+    mu = 5008.24
+    sl, g = rm.line_profile(fine, mu, sigma)
+    w = fine[sl]
+    dnu = rm.LIGHTSPEED / w**2 * (fine[-1] - fine[0]) / (fine.size - 1)
+    assert np.isclose(np.sum(g * dnu), 1.0, rtol=0, atol=1e-12)
+    assert np.allclose(g, raw_profile(w, mu, sigma), rtol=1e-9, atol=0)
+    assert abs(np.sum(w * g * dnu) - mu) < 1e-6 * mu * sigma / rm.CKMS + 1e-9
+    var = np.sum((w - mu) ** 2 * g * dnu)
+    assert np.isclose(np.sqrt(var), mu * sigma / rm.CKMS, rtol=1e-6)
+
+
+def test_line_profile_at_grid_edge_and_too_narrow():
+    """A line cut by the grid keeps its inside values; a line narrower than the step is refused."""
+    fine = np.arange(4000.0, 7000.0, rm.FINE_STEP)
+    cut = fine[: np.searchsorted(fine, 5010.0)]
+    mu = 5008.24
+    sl_full, g_full = rm.line_profile(fine, mu, 100.0)
+    sl_cut, g_cut = rm.line_profile(cut, mu, 100.0)
+    assert sl_cut.start == sl_full.start and sl_cut.stop == cut.size
+    assert np.allclose(g_cut, g_full[: sl_cut.stop - sl_cut.start], rtol=1e-12, atol=0)
+    assert rm.line_profile(fine, 3000.0, 100.0)[1].size == 0
+    with pytest.raises(ValueError, match="narrower"):
+        rm.line_profile(fine, mu, 1.0)
+    assert rm.line_profile(fine, 1000.0, 1.0)[1].size == 0

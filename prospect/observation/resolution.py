@@ -17,9 +17,12 @@ from scipy.interpolate import CubicSpline
 from scipy.sparse import csr_matrix, dia_matrix
 
 __all__ = ["FINE_STEP", "banded_offsets", "banded_to_csr", "uniform_step", "fine_grid",
-           "resampled_matrix"]
+           "resampled_matrix", "line_profile"]
 
 FINE_STEP = 0.05  # Angstrom
+# prospect's values (sources.constants), so line profiles match SpecModel.get_eline_gaussians
+CKMS = 2.998e5  # km/s
+LIGHTSPEED = 2.998e18  # Angstrom/s
 
 
 def banded_offsets(ndiag):
@@ -160,4 +163,54 @@ def resampled_matrix(wave, data, fine):
     return csr_matrix(
         (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n, fine.size)
     )
+
+
+def line_profile(fine, mu, sigma_kms, nsig=8.0):
+    """Return a unit-flux Gaussian line in f_nu sampled on a uniform fine grid.
+
+    The profile is that of SpecModel.get_eline_gaussians, a Gaussian in velocity about ``mu``
+    times dv/dnu. It is evaluated within ``nsig`` widths of ``mu`` and scaled so that its sum
+    over frequency on the fine grid is one. The scale is taken over the whole profile, so a line
+    cut by the end of the grid keeps the values it would have inside.
+
+    Parameters
+    ----------
+    fine : np.ndarray
+        The uniform fine grid in Angstrom.
+    mu : float
+        Line centre in Angstrom.
+    sigma_kms : float
+        Gaussian width in km/s.
+    nsig : float
+        Half width of the evaluated window in units of ``sigma_kms``.
+
+    Returns
+    -------
+    sl : slice
+        The fine grid points the line covers. Empty if it misses the grid.
+    values : np.ndarray
+        The profile at those points, per Hz.
+
+    Raises
+    ------
+    ValueError
+        If the line reaches the grid and is narrower than the fine step.
+    """
+    step = (fine[-1] - fine[0]) / (fine.size - 1)
+    sigma_aa = mu * sigma_kms / CKMS
+    half = nsig * sigma_aa
+    k0 = int(np.ceil((mu - half - fine[0]) / step))
+    k1 = int(np.floor((mu + half - fine[0]) / step)) + 1
+    a, b = max(k0, 0), min(k1, fine.size)
+    if b <= a:
+        return slice(0, 0), np.zeros(0)
+    if not sigma_aa >= step:
+        raise ValueError(f"a line of {sigma_kms:g} km/s at {mu:.1f} A is narrower than the "
+                         f"fine step {step:g} A")
+    w = fine[0] + np.arange(k0, k1) * step
+    dv = CKMS * (w / mu - 1)
+    g = np.exp(-0.5 * (dv / sigma_kms) ** 2) / (sigma_kms * np.sqrt(2 * np.pi))
+    g *= CKMS * w**2 / (LIGHTSPEED * mu)
+    g /= np.sum(g * LIGHTSPEED / w**2) * step
+    return slice(a, b), g[a - k0:b - k0]
 
