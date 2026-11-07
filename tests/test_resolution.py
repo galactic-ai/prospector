@@ -197,3 +197,82 @@ def test_zero_tied_spline_keeps_row_sums_and_free_ends_do_not():
     rowsum = dense.sum(axis=1)
     assert np.max(np.abs(np.asarray(tied.sum(axis=1)).ravel() - rowsum)) < 1e-10
     assert np.max(np.abs(np.asarray(free.sum(axis=1)).ravel() - rowsum)) > 1e-4
+
+
+def resolution_spectrum(data, mask=None):
+    """Return a rectified ResolutionMatrixSpectrum of unit flux on the 5000 A test grid."""
+    from prospect.observation import ResolutionMatrixSpectrum
+
+    n = data.shape[1]
+    kw = dict(mask=mask) if mask is not None else {}
+    obs = ResolutionMatrixSpectrum(wavelength=5000.0 + DPIX * np.arange(n), resolution_matrix=data,
+                                   flux=np.ones(n), uncertainty=0.1 * np.ones(n), **kw)
+    obs.rectify()
+    return obs
+
+
+def test_spectrum_matches_gaussian_lsf():
+    """With one Gaussian row kernel, R' smoothing equals Spectrum's Gaussian LSF of the same width.
+
+    The residual, 2.4e-4 on a sine of amplitude 0.3 (2026-11-06), comes from sampling the kernel
+    at the pixels.
+    """
+    from prospect.observation import Spectrum
+
+    wave, data = gaussian_banded(n=400, width=1.0)
+    obs = resolution_spectrum(data)
+    gauss = Spectrum(wavelength=wave, resolution=DPIX / wave * CKMS, flux=np.ones(wave.size),
+                     uncertainty=0.1 * np.ones(wave.size))
+    gauss.rectify()
+    mw = np.arange(4950.0, 5400.0, 0.1)
+    mf = 1 + 0.3 * np.sin(2 * np.pi * (mw - 5000.0) / 40.0)
+    out = obs.instrumental_smoothing(mw, mf)
+    ref = gauss.instrumental_smoothing(mw, mf, libres=np.zeros_like(mw))
+    assert np.max(np.abs(out - ref)[20:-20]) < 1e-3
+
+
+def test_spectrum_caches_and_pickles_without_rprime():
+    """R' is built once, left out of the pickle, and rebuilt to the same result."""
+    import pickle
+
+    _, data = gaussian_banded(n=200)
+    obs = resolution_spectrum(data)
+    first = obs.resampled()
+    assert obs.resampled() is first
+    copy = pickle.loads(pickle.dumps(obs))
+    assert copy._rprime is None
+    mw = np.arange(4950.0, 5200.0, 0.1)
+    mf = 1 + 1e-3 * (mw - 5000.0)
+    assert np.array_equal(copy.instrumental_smoothing(mw, mf), obs.instrumental_smoothing(mw, mf))
+
+
+def test_spectrum_check_rows_uses_the_mask():
+    """A zero row of R raises on a fitted pixel and is ignored on a masked one."""
+    _, data = gaussian_banded(n=200)
+    for kk, off in enumerate(rm.banded_offsets(NDIAG)):
+        data[kk, 50 + off] = 0.0
+    resolution_spectrum(data, mask=np.arange(200) != 50).check_rows()
+    with pytest.raises(ValueError, match="row sums"):
+        resolution_spectrum(data).check_rows()
+
+
+def test_spectrum_refuses_bad_inputs():
+    """Gaussian resolution, a missing or float32 grid, a wrong matrix shape and libres != 0."""
+    from prospect.observation import ResolutionMatrixSpectrum
+
+    wave, data = gaussian_banded(n=200)
+    kw = dict(flux=np.ones(200), uncertainty=np.ones(200))
+    with pytest.raises(ValueError, match="resolution_matrix, not resolution"):
+        ResolutionMatrixSpectrum(wavelength=wave, resolution_matrix=data, resolution=60.0, **kw)
+    with pytest.raises(ValueError, match="needs wavelength"):
+        ResolutionMatrixSpectrum(resolution_matrix=data, **kw)
+    with pytest.raises(ValueError, match="not uniform"):
+        ResolutionMatrixSpectrum(wavelength=wave.astype(np.float32), resolution_matrix=data, **kw)
+    with pytest.raises(ValueError, match="expected"):
+        ResolutionMatrixSpectrum(wavelength=wave, resolution_matrix=data[:, :-1], **kw)
+    obs = resolution_spectrum(data)
+    mw = np.arange(4950.0, 5200.0, 0.1)
+    with pytest.raises(ValueError, match="libres"):
+        obs.instrumental_smoothing(mw, np.ones_like(mw), libres=np.full_like(mw, 10.0))
+    with pytest.raises(ValueError, match="cover"):
+        obs.instrumental_smoothing(mw[600:], np.ones(mw.size - 600))  # starts at 5010 A
