@@ -275,3 +275,10 @@ def test_flat_prior_penalty_is_the_integral(observations):
         -12 * s[0], 12 * s[0], -12 * s[1], 12 * s[1], epsabs=0, epsrel=1e-10,
     )
     assert model._ln_eline_penalty == pytest.approx(np.log(val), abs=1e-6)
+
+
+def test_columns_refuse_gaussian_lsf_spectrum(observations):
+    """Free line columns are only built on the R path, so a plain Spectrum raises."""
+    _, _, gauss = observations
+    with pytest.raises(NotImplementedError, match="ResolutionMatrixSpectrum"):
+        predict(with_columns([OIII]), gauss, FakeSPS())
