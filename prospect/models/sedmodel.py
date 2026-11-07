@@ -288,6 +288,8 @@ class SpecModel(ProspectorParams):
         """
         if isinstance(obs, ResolutionMatrixSpectrum):
             return self._predict_spec_rmatrix(obs)
+        if self.line_columns:
+            raise NotImplementedError("free line columns need a ResolutionMatrixSpectrum observation")
 
         # redshift model wavelength
         obs_wave = self.observed_wave(self._wave, do_wavecal=False)
@@ -1166,6 +1168,8 @@ class AGNSpecModel(SpecModel):
             including multiplication by the calibration vector.
             ndarray of shape ``(nwave,)`` in units of maggies.
         """
+        if self.line_columns:
+            raise NotImplementedError("free line columns are not supported by AGNSpecModel")
         # redshift wavelength
         obs_wave = self.observed_wave(self._wave, do_wavecal=False)
         self._outwave = obs.get('wavelength', obs_wave)
